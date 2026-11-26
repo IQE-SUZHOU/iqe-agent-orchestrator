@@ -1,7 +1,7 @@
 """端到端（集成）测试：覆盖 Monitor 的每一类场景（无报错 / 新失败 / 已知噪声 / 重复 /
 Flaky / infra 中断 / 大量失败 / 源不可用），并校验下游链路、回炉、幂等、DLQ、计划兜底。
 
-前置：编排层与 6 个 Agent 已在跑（本机 tools/run_local.sh 或 k8s 部署），
+前置：编排层与 6 个 Agent 已在跑（本机 scripts/run_local.sh 或 k8s 部署），
 且环境变量 ORCH_BASE_URL / PG_DSN 指向它。凭据从 deploy/secrets.env 来，不在代码里写死。
 
     # 本机栈
@@ -10,6 +10,7 @@ Flaky / infra 中断 / 大量失败 / 源不可用），并校验下游链路、
     ORCH_BASE_URL=http://172.31.0.3:30099 PG_DSN="postgresql://postgres:…@10.96.75.0:5432/ci_triage" \\
         pytest -m integration -q
 """
+
 from __future__ import annotations
 
 import os
@@ -22,8 +23,10 @@ import requests
 
 pytestmark = pytest.mark.integration
 
+pytestmark = pytest.mark.integration
+
 BASE = os.environ.get("ORCH_BASE_URL", "http://127.0.0.1:8080")
-PG = os.environ.get("PG_DSN", "postgresql://postgres:postgres@127.0.0.1:5432/ci_triage")
+PG = os.environ.get("PG_DSN", "postgresql://postgres@127.0.0.1:5432/ci_triage")
 TERMINAL = {"closed", "closed_rejected", "blocked"}
 
 
@@ -37,10 +40,17 @@ def api(path: str, **kw) -> Any:
 async def _fetch(sql: str, *args) -> list[dict]:
     conn = await asyncpg.connect(PG, timeout=20)
     for typ in ("jsonb", "json"):
-        await conn.set_type_codec(typ, schema="pg_catalog", format="text",
-                                  encoder=lambda v: v if v is None or isinstance(v, (str, bytes))
-                                  else __import__("json").dumps(v, ensure_ascii=False),
-                                  decoder=__import__("json").loads)
+        await conn.set_type_codec(
+            typ,
+            schema="pg_catalog",
+            format="text",
+            encoder=lambda v: (
+                v
+                if v is None or isinstance(v, (str, bytes))
+                else __import__("json").dumps(v, ensure_ascii=False)
+            ),
+            decoder=__import__("json").loads,
+        )
     try:
         return [dict(r) for r in await conn.fetch(sql, *args)]
     finally:
@@ -49,6 +59,7 @@ async def _fetch(sql: str, *args) -> list[dict]:
 
 def q(sql: str, *args) -> list[dict]:
     import asyncio
+
     return asyncio.run(_fetch(sql, *args))
 
 
@@ -58,7 +69,9 @@ def q1(sql: str, *args) -> dict | None:
 
 
 def trigger_scan(scenario: str) -> dict:
-    res = api("/api/scan", method="POST", json={"scenario": scenario, "lookback": "24h", "wait": True})
+    res = api(
+        "/api/scan", method="POST", json={"scenario": scenario, "lookback": "24h", "wait": True}
+    )
     assert res["status"] in ("done", "blocked"), res
     return res
 
@@ -71,11 +84,16 @@ def wait_cases(scan_id: str, expect: int, timeout_s: int = 240) -> list[dict]:
             return rows
         time.sleep(2)
     rows = q("select * from cases where scan_id=$1", scan_id)
-    raise AssertionError(f"扫描 {scan_id} 的 Case 未全部终态：{[(r['case_id'][:8], r['status']) for r in rows]}")
+    raise AssertionError(
+        f"扫描 {scan_id} 的 Case 未全部终态：{[(r['case_id'][:8], r['status']) for r in rows]}"
+    )
 
 
 def stages_of(case_id: str) -> list[str]:
-    rows = q("select stage, status, step_id, attempt, error from stage_runs where case_id=$1 order by id", case_id)
+    rows = q(
+        "select stage, status, step_id, attempt, error from stage_runs where case_id=$1 order by id",
+        case_id,
+    )
     return [r["stage"] for r in rows]
 
 
@@ -86,26 +104,109 @@ def trace_rows(case_id: str) -> list[dict]:
 # --------------------------------------------------------------------------- Monitor 场景矩阵
 SCENARIOS: dict[str, dict[str, Any]] = {
     "all_success": {"observed": 3, "promoted": 0, "suppressed": 0, "cases": 3, "signals": {"none"}},
-    "new_failure": {"observed": 3, "promoted": 1, "suppressed": 0, "cases": 3, "signals": {"error", "none"}},
-    "known_issue_noise": {"observed": 3, "promoted": 0, "suppressed": 3, "cases": 0, "signals": set()},
-    "mixed": {"observed": 4, "promoted": 1, "suppressed": 1, "cases": 3, "signals": {"error", "none"}},
-    "duplicate_merge": {"observed": 4, "promoted": 1, "suppressed": 3, "cases": 1, "signals": {"error"}},
-    "flaky_unstable": {"observed": 1, "promoted": 1, "suppressed": 0, "cases": 1, "signals": {"error"}},
-    "aborted_infra": {"observed": 1, "promoted": 1, "suppressed": 0, "cases": 1, "signals": {"error"}},
-    "many_errors": {"observed": 5, "promoted": 5, "suppressed": 0, "cases": 5, "signals": {"error"}},
-    "blocked_no_machine": {"observed": 1, "promoted": 1, "suppressed": 0, "cases": 1, "signals": {"error"}},
+    "new_failure": {
+        "observed": 3,
+        "promoted": 1,
+        "suppressed": 0,
+        "cases": 3,
+        "signals": {"error", "none"},
+    },
+    "known_issue_noise": {
+        "observed": 3,
+        "promoted": 0,
+        "suppressed": 3,
+        "cases": 0,
+        "signals": set(),
+    },
+    "mixed": {
+        "observed": 4,
+        "promoted": 1,
+        "suppressed": 1,
+        "cases": 3,
+        "signals": {"error", "none"},
+    },
+    "duplicate_merge": {
+        "observed": 4,
+        "promoted": 1,
+        "suppressed": 3,
+        "cases": 1,
+        "signals": {"error"},
+    },
+    "flaky_unstable": {
+        "observed": 1,
+        "promoted": 1,
+        "suppressed": 0,
+        "cases": 1,
+        "signals": {"error"},
+    },
+    "aborted_infra": {
+        "observed": 1,
+        "promoted": 1,
+        "suppressed": 0,
+        "cases": 1,
+        "signals": {"error"},
+    },
+    "many_errors": {
+        "observed": 5,
+        "promoted": 5,
+        "suppressed": 0,
+        "cases": 5,
+        "signals": {"error"},
+    },
+    "blocked_no_machine": {
+        "observed": 1,
+        "promoted": 1,
+        "suppressed": 0,
+        "cases": 1,
+        "signals": {"error"},
+    },
     "timeout": {"observed": 1, "promoted": 1, "suppressed": 0, "cases": 1, "signals": {"error"}},
-    "not_reproducible": {"observed": 1, "promoted": 1, "suppressed": 0, "cases": 1, "signals": {"error"}},
+    "not_reproducible": {
+        "observed": 1,
+        "promoted": 1,
+        "suppressed": 0,
+        "cases": 1,
+        "signals": {"error"},
+    },
     "needs_info": {"observed": 1, "promoted": 1, "suppressed": 0, "cases": 1, "signals": {"error"}},
-    "insufficient": {"observed": 1, "promoted": 1, "suppressed": 0, "cases": 1, "signals": {"error"}},
+    "insufficient": {
+        "observed": 1,
+        "promoted": 1,
+        "suppressed": 0,
+        "cases": 1,
+        "signals": {"error"},
+    },
     "reject": {"observed": 1, "promoted": 1, "suppressed": 0, "cases": 1, "signals": {"error"}},
     "duplicate": {"observed": 1, "promoted": 1, "suppressed": 0, "cases": 1, "signals": {"error"}},
-    "unknown_low_confidence": {"observed": 1, "promoted": 1, "suppressed": 0, "cases": 1,
-                               "signals": {"error"}},
-    "llm_warming": {"observed": 1, "promoted": 1, "suppressed": 0, "cases": 1, "signals": {"error"}},
-    "llm_invalid": {"observed": 1, "promoted": 1, "suppressed": 0, "cases": 1, "signals": {"error"}},
-    "source_unavailable": {"observed": 0, "promoted": 0, "suppressed": 0, "cases": 0, "signals": set(),
-                           "scan_status": "blocked"},
+    "unknown_low_confidence": {
+        "observed": 1,
+        "promoted": 1,
+        "suppressed": 0,
+        "cases": 1,
+        "signals": {"error"},
+    },
+    "llm_warming": {
+        "observed": 1,
+        "promoted": 1,
+        "suppressed": 0,
+        "cases": 1,
+        "signals": {"error"},
+    },
+    "llm_invalid": {
+        "observed": 1,
+        "promoted": 1,
+        "suppressed": 0,
+        "cases": 1,
+        "signals": {"error"},
+    },
+    "source_unavailable": {
+        "observed": 0,
+        "promoted": 0,
+        "suppressed": 0,
+        "cases": 0,
+        "signals": set(),
+        "scan_status": "blocked",
+    },
 }
 
 
@@ -120,8 +221,9 @@ def test_monitor_scenario_end_to_end(scenario: str):
     assert counts["observed"] == exp["observed"], f"{scenario}: observed {counts}"
     assert counts["suppressed"] == exp["suppressed"], f"{scenario}: suppressed {counts}"
     if exp.get("scan_status") != "blocked":
-        assert counts.get("errors_promoted", counts.get("promoted", 0)) == exp["promoted"], \
-            f"{scenario}: promoted {counts}"
+        assert (
+            counts.get("errors_promoted", counts.get("promoted", 0)) == exp["promoted"]
+        ), f"{scenario}: promoted {counts}"
     assert len(res["cases"]) == exp["cases"], f"{scenario}: 建 Case 数 {res['cases']}"
 
     rows = wait_cases(scan_id, exp["cases"])
@@ -146,7 +248,7 @@ def test_monitor_scenario_end_to_end(scenario: str):
         assert r["plan_id"], f"Case {r['case_id']} 没有封存计划"
         assert r["plan_source"] in ("workflow", "llm")
         assert (r["progress"] or {}).get("step_status"), "progress.step_status 为空"
-        assert stages_of(r["case_id"]) , "无 stage_run 记录"
+        assert stages_of(r["case_id"]), "无 stage_run 记录"
     if exp["cases"]:
         assert any(r["status"] in TERMINAL for r in rows)
     # 同一扫描的 Case 共享 run_id（同一 correlation 链）
@@ -164,25 +266,38 @@ def test_s1_lite_has_no_reproduction_command():
         assert c["status"] == "closed", c["blocked_reason"]
         assert c["progress"]["workflow_key"] == "s1_lite", c["progress"]
         # 三态结论：无新失败
-        out = q1("select output from stage_runs where case_id=$1 and stage='triage'", c["case_id"])["output"]
-        assert out["rca"] == "unknown", out            # 契约枚举：driver/test/environment/infrastructure/unknown
-        assert out["repro_eligible"] is False, out      # 无报错 ⇒ 不占用复现机位
+        out = q1("select output from stage_runs where case_id=$1 and stage='triage'", c["case_id"])[
+            "output"
+        ]
+        assert (
+            out["rca"] == "unknown"
+        ), out  # 契约枚举：driver/test/environment/infrastructure/unknown
+        assert out["repro_eligible"] is False, out  # 无报错 ⇒ 不占用复现机位
         assert out["confidence"] < 0.7, out
 
 
 def test_s2_full_runs_all_six_agents_in_order():
     """含报错：Monitor → Triage → Reproduction → Ticket → Review → Reporting 全链。"""
     res = trigger_scan("new_failure")
-    err = [r for r in wait_cases(res["scan_id"], 3) if r["signal"] == "error"][0]
-    stages = [r["stage"] for r in q("select stage from stage_runs where case_id=$1 order by id", err["case_id"])]
+    err = next(r for r in wait_cases(res["scan_id"], 3) if r["signal"] == "error")
+    stages = [
+        r["stage"]
+        for r in q("select stage from stage_runs where case_id=$1 order by id", err["case_id"])
+    ]
     assert stages == ["triage", "reproduction", "ticket", "review", "reporting"], stages
     assert err["progress"]["workflow_key"] == "s2_full"
     assert err["status"] == "closed"
     tk = q1("select * from tickets where case_id=$1", err["case_id"])
     assert tk and tk["ticket_status"] in ("created", "linked_duplicate"), tk
-    rv = q1("select verdict from reviews where case_id=$1 order by loop_seq desc limit 1", err["case_id"])
+    rv = q1(
+        "select verdict from reviews where case_id=$1 order by loop_seq desc limit 1",
+        err["case_id"],
+    )
     assert rv["verdict"] == "approve", rv
-    assert q("select 1 from stage_runs where case_id=$1 and stage='reporting' and status='done'", err["case_id"])
+    assert q(
+        "select 1 from stage_runs where case_id=$1 and stage='reporting' and status='done'",
+        err["case_id"],
+    )
 
 
 def test_known_issue_noise_is_suppressed_with_evidence():
@@ -194,7 +309,9 @@ def test_known_issue_noise_is_suppressed_with_evidence():
     assert all(r is None for r in reasons)
     sup = [o for o in res["observations"] if o.get("suppressed")]
     assert len(sup) == 3 and all(o.get("known_issue_ref") for o in sup), sup
-    assert all((o.get("context") or {}).get("suppressed_reason") == "known_issue_noise" for o in sup), sup
+    assert all(
+        (o.get("context") or {}).get("suppressed_reason") == "known_issue_noise" for o in sup
+    ), sup
     assert all(o.get("promoted_reason") is None for o in sup), "被抑制的观测不应有 promoted_reason"
 
 
@@ -215,7 +332,9 @@ def test_duplicate_merge_creates_one_case_with_merge_note():
 def test_aborted_infra_skips_reproduction():
     res = trigger_scan("aborted_infra")
     row = wait_cases(res["scan_id"], 1)[0]
-    triage_out = q1("select output from stage_runs where case_id=$1 and stage='triage'", row["case_id"])["output"]
+    triage_out = q1(
+        "select output from stage_runs where case_id=$1 and stage='triage'", row["case_id"]
+    )["output"]
     assert triage_out["rca"] == "infrastructure", triage_out
     assert row["progress"]["workflow_key"] == "s6_infra_direct", row["progress"]
     assert "reproduction" not in stages_of(row["case_id"])
@@ -227,7 +346,9 @@ def test_flaky_unstable_marks_reproduction_flaky():
     row = wait_cases(res["scan_id"], 1)[0]
     obs = res["observations"][0]
     assert obs.get("promoted_reason") == "unstable_result", obs
-    out = q1("select output from stage_runs where case_id=$1 and stage='reproduction'", row["case_id"])["output"]
+    out = q1(
+        "select output from stage_runs where case_id=$1 and stage='reproduction'", row["case_id"]
+    )["output"]
     assert out["reproducible"] == "flaky", out
     # 复现矩阵：同参数三次重建，中间一次通过 → 不稳定度（契约字段是 matrix[].outcome）
     outcomes = [m["outcome"] for m in out["matrix"]]
@@ -249,7 +370,10 @@ def test_reproduction_blocked_case_ends_blocked():
     res = trigger_scan("blocked_no_machine")
     row = wait_cases(res["scan_id"], 1)[0]
     assert row["status"] == "blocked", row["blocked_reason"]
-    runs = q("select stage, status, attempt, error from stage_runs where case_id=$1 order by id", row["case_id"])
+    runs = q(
+        "select stage, status, attempt, error from stage_runs where case_id=$1 order by id",
+        row["case_id"],
+    )
     repro = [r for r in runs if r["stage"] == "reproduction"]
     assert repro and repro[0]["status"] == "blocked", repro
     assert (repro[0]["error"] or {}).get("code") == "source_unavailable", repro
@@ -272,15 +396,25 @@ def test_review_needs_info_loops_back_to_triage_then_approves():
     res = trigger_scan("needs_info")
     row = wait_cases(res["scan_id"], 1)[0]
     assert row["status"] == "closed", row["blocked_reason"]
-    stages = [r["stage"] for r in q("select stage from stage_runs where case_id=$1 order by id", row["case_id"])]
+    stages = [
+        r["stage"]
+        for r in q("select stage from stage_runs where case_id=$1 order by id", row["case_id"])
+    ]
     assert stages.count("triage") == 2, f"应回炉一次重跑 triage：{stages}"
     assert stages[-1] == "reporting", stages
     assert row["progress"]["review_loop_seq"] == 1, row["progress"]
-    verdicts = [r["verdict"] for r in q("select verdict, loop_seq from reviews where case_id=$1 order by loop_seq",
-                                         row["case_id"])]
+    verdicts = [
+        r["verdict"]
+        for r in q(
+            "select verdict, loop_seq from reviews where case_id=$1 order by loop_seq",
+            row["case_id"],
+        )
+    ]
     assert verdicts == ["needs_info", "approve"], verdicts
     # 回炉时清空下游：ticket 只有一条最新记录
-    assert q("select 1 from stage_runs where case_id=$1 and stage='review' and attempt=1", row["case_id"])
+    assert q(
+        "select 1 from stage_runs where case_id=$1 and stage='review' and attempt=1", row["case_id"]
+    )
 
 
 def test_review_insufficient_exhausts_loop_and_blocks():
@@ -296,7 +430,10 @@ def test_review_reject_closes_without_reporting():
     res = trigger_scan("reject")
     row = wait_cases(res["scan_id"], 1)[0]
     assert row["status"] == "closed_rejected", row["blocked_reason"]
-    stages = [r["stage"] for r in q("select stage from stage_runs where case_id=$1 order by id", row["case_id"])]
+    stages = [
+        r["stage"]
+        for r in q("select stage from stage_runs where case_id=$1 order by id", row["case_id"])
+    ]
     assert "reporting" not in stages, stages
     assert stages[-1] == "review", stages
 
@@ -306,25 +443,33 @@ def test_ticket_duplicate_links_and_reviewer_flags_it():
     row = wait_cases(res["scan_id"], 1)[0]
     tk = q1("select * from tickets where case_id=$1", row["case_id"])
     assert tk["ticket_status"] == "linked_duplicate" and tk["duplicate_of"], tk
-    checks = q1("select checks from reviews where case_id=$1 order by loop_seq desc limit 1",
-                row["case_id"])["checks"]
-    dup_check = [c for c in checks if c["id"] == "no_duplicate_ticket"][0]
+    checks = q1(
+        "select checks from reviews where case_id=$1 order by loop_seq desc limit 1", row["case_id"]
+    )["checks"]
+    dup_check = next(c for c in checks if c["id"] == "no_duplicate_ticket")
     assert dup_check["pass"] is False, checks
-    rv = q1("select verdict from reviews where case_id=$1 order by loop_seq desc limit 1", row["case_id"])
+    rv = q1(
+        "select verdict from reviews where case_id=$1 order by loop_seq desc limit 1",
+        row["case_id"],
+    )
     assert rv["verdict"] in ("needs_info", "reject"), rv
 
 
 def test_reproduction_not_reproducible_and_timeout_paths():
     res = trigger_scan("not_reproducible")
     row = wait_cases(res["scan_id"], 1)[0]
-    out = q1("select output from stage_runs where case_id=$1 and stage='reproduction'", row["case_id"])["output"]
+    out = q1(
+        "select output from stage_runs where case_id=$1 and stage='reproduction'", row["case_id"]
+    )["output"]
     assert out["reproducible"] == "no", out
     assert row["status"] in ("closed", "blocked")
 
     res2 = trigger_scan("timeout")
     row2 = wait_cases(res2["scan_id"], 1, timeout_s=300)[0]
-    runs = q("select status, attempt from stage_runs where case_id=$1 and stage='reproduction' order by id",
-             row2["case_id"])
+    runs = q(
+        "select status, attempt from stage_runs where case_id=$1 and stage='reproduction' order by id",
+        row2["case_id"],
+    )
     assert len(runs) == 2 and all(r["status"] in ("timeout", "late") for r in runs), runs
     assert row2["status"] == "blocked", row2["blocked_reason"]
     assert "timeout" in (row2["blocked_reason"] or "").lower(), row2["blocked_reason"]
@@ -333,10 +478,15 @@ def test_reproduction_not_reproducible_and_timeout_paths():
 def test_triage_low_confidence_gates_review():
     res = trigger_scan("unknown_low_confidence")
     row = wait_cases(res["scan_id"], 1)[0]
-    out = q1("select output from stage_runs where case_id=$1 and stage='triage'", row["case_id"])["output"]
+    out = q1("select output from stage_runs where case_id=$1 and stage='triage'", row["case_id"])[
+        "output"
+    ]
     assert out["rca"] == "unknown" and out["confidence"] < 0.7, out
-    rv = q1("select verdict, checks from reviews where case_id=$1 order by loop_seq desc limit 1", row["case_id"])
-    conf_check = [c for c in rv["checks"] if c["id"] == "triage_confidence_ok"][0]
+    rv = q1(
+        "select verdict, checks from reviews where case_id=$1 order by loop_seq desc limit 1",
+        row["case_id"],
+    )
+    conf_check = next(c for c in rv["checks"] if c["id"] == "triage_confidence_ok")
     assert conf_check["pass"] is False, rv["checks"]
 
 
@@ -349,6 +499,7 @@ def test_registry_match_wins_and_plan_is_sealed():
     yaml_text = api(f"/api/cases/{row['case_id']}/plan.yaml")
     assert "steps:" in yaml_text and plan["yaml_sha256"], yaml_text[:120]
     import hashlib
+
     assert hashlib.sha256(yaml_text.encode("utf-8")).hexdigest() == plan["yaml_sha256"]
 
 
@@ -359,7 +510,10 @@ def test_llm_fallback_used_when_registry_has_no_match():
     assert plan["source"] == "llm", plan
     assert plan["rationale"], "LLM 计划必须有 rationale"
     assert plan["degraded"] is False
-    stages = [r["stage"] for r in q("select stage from stage_runs where case_id=$1 order by id", row["case_id"])]
+    stages = [
+        r["stage"]
+        for r in q("select stage from stage_runs where case_id=$1 order by id", row["case_id"])
+    ]
     assert "triage" in stages and "review" in stages
     assert row["status"] == "closed", row["blocked_reason"]
     assert row["plan_source"] == "llm"
@@ -372,7 +526,10 @@ def test_invalid_llm_plan_is_rejected_and_degrades_to_builtin():
     assert plan["degraded"] is True, plan
     assert plan["workflow_key"] == "s2_full", plan
     assert "degraded" in (plan["rationale"] or "").lower(), plan["rationale"]
-    stages = [r["stage"] for r in q("select stage from stage_runs where case_id=$1 order by id", row["case_id"])]
+    stages = [
+        r["stage"]
+        for r in q("select stage from stage_runs where case_id=$1 order by id", row["case_id"])
+    ]
     assert "reproduction" in stages, stages
     assert row["status"] == "closed", row["blocked_reason"]
 
@@ -394,10 +551,15 @@ def test_case_and_daily_reports():
 
 # --------------------------------------------------------------------------- 幂等 / DLQ / 重放
 def test_duplicate_command_is_absorbed_by_idempotency():
-    res = api("/api/ops/inject", method="POST",
-              json={"kind": "duplicate_command", "stage": "review", "mode": "run", "publish_times": 3})
+    res = api(
+        "/api/ops/inject",
+        method="POST",
+        json={"kind": "duplicate_command", "stage": "review", "mode": "run", "publish_times": 3},
+    )
     assert res["dlq_rows"] == 0, res
-    assert res["evidence_rows"] == 1, f"重复命令应被幂等吸收，实际产生 {res['evidence_rows']} 条证据"
+    assert (
+        res["evidence_rows"] == 1
+    ), f"重复命令应被幂等吸收，实际产生 {res['evidence_rows']} 条证据"
     keys = q("select count(*) n from msg_dedup where dedup_key=$1", res["idempotency_key"])
     assert keys[0]["n"] == 1, keys
 
@@ -406,8 +568,11 @@ def test_bad_command_goes_to_dlq_with_context():
     res = api("/api/ops/inject", method="POST", json={"kind": "bad_command", "stage": "review"})
     assert res["dlq_rows"] == 1, res
     assert res["evidence_rows"] == 0, "毒消息不能被执行"
-    row = q1("select stage, idempotency_key, reason, original_routing_key, redelivered, body from dlq"
-             " where idempotency_key=$1", res["idempotency_key"])
+    row = q1(
+        "select stage, idempotency_key, reason, original_routing_key, redelivered, body from dlq"
+        " where idempotency_key=$1",
+        res["idempotency_key"],
+    )
     assert row["stage"] == "review" and row["original_routing_key"] == "ci.cmd.review.run", row
     assert "contract_violation" in row["reason"] or "expired" in row["reason"], row["reason"]
     assert '"payload"' in row["body"] and '"mode"' in row["body"], row["body"][:200]
@@ -416,7 +581,7 @@ def test_bad_command_goes_to_dlq_with_context():
 def test_replay_reuses_plan_and_is_idempotent_per_attempt():
     res = trigger_scan("new_failure")
     rows = wait_cases(res["scan_id"], 3)
-    err = [r for r in rows if r["signal"] == "error"][0]
+    err = next(r for r in rows if r["signal"] == "error")
     before = q("select idempotency_key from stage_runs where case_id=$1", err["case_id"])
     api(f"/api/cases/{err['case_id']}/replay", method="POST")
     after = q("select idempotency_key, status from stage_runs where case_id=$1", err["case_id"])
