@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}CI Triage 编排控制台{% endblock %}</title>
+<style>
+:root{--bg:#0f1418;--panel:#161d23;--line:#26313a;--fg:#d7e2ea;--dim:#8ba0b0;--ok:#3fb98a;--warn:#e0a458;--err:#e05c5c;--acc:#4b9fea;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",Segoe UI,Roboto,sans-serif}
+nav{display:flex;gap:18px;align-items:center;padding:12px 22px;border-bottom:1px solid var(--line);background:#111820;position:sticky;top:0}
+nav b{color:var(--acc);letter-spacing:.5px}
+nav a{color:var(--dim);text-decoration:none}nav a:hover,nav a.on{color:var(--fg)}
+main{padding:20px 22px 60px;max-width:1400px}
+h2{font-size:16px;margin:22px 0 10px;color:#b9c9d6}
+table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{background:#1b242c;color:var(--dim);font-weight:600;font-size:12.5px;white-space:nowrap}
+tr:last-child td{border-bottom:none}
+a.case{color:var(--acc);text-decoration:none;font-family:ui-monospace,Menlo,monospace;font-size:12.5px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:14px}
+.kpis{display:flex;flex-wrap:wrap;gap:10px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 14px;min-width:120px}
+.kpi i{display:block;font-style:normal;color:var(--dim);font-size:12px}
+.kpi b{font-size:20px}
+.tag{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11.5px;border:1px solid var(--line)}
+.t-closed{color:var(--ok);border-color:#2c5c48}.t-triaged{color:var(--acc);border-color:#2c4a63}
+.t-blocked{color:var(--err);border-color:#5c2c2c}.t-closed_rejected{color:var(--warn);border-color:#5c4a2c}
+.t-created{color:var(--dim)}.t-error{color:var(--err)}.t-none{color:var(--dim)}
+.t-workflow{color:var(--acc)}.t-llm{color:#c58af9}
+button{background:#1d2833;color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:7px 12px;cursor:pointer}
+button:hover{border-color:var(--acc)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
+pre{background:#10161c;border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;font-size:12.5px;white-space:pre-wrap}
+.steps{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.step{border:1px solid var(--line);border-radius:8px;padding:8px 12px;background:#10161c;min-width:130px}
+.step .id{font-family:ui-monospace,monospace;font-size:11px;color:var(--dim)}
+.step.done{border-color:#2c5c48}.step.blocked{border-color:#5c2c2c}.step.current{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}
+.arrow{color:var(--dim)}
+.muted{color:var(--dim);font-size:12.5px}
+.timeline{border-left:2px solid var(--line);margin-left:8px;padding-left:14px}
+.timeline div{margin-bottom:6px}
+.small{font-size:12px}
+input,select{background:#10161c;border:1px solid var(--line);color:var(--fg);border-radius:7px;padding:7px 9px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.evi{border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:8px;background:#10161c}
+.evi p{margin:4px 0 0;color:var(--dim);white-space:pre-wrap;font-size:12.5px;max-height:150px;overflow:auto}
+</style>
+</head>
+<body>
+<nav>
+  <b>CI Triage · 编排控制台</b>
+  <a href="/" class="{% block nav_index %}{% endblock %}">任务总览</a>
+  <a href="/ui/plans" class="{% block nav_plans %}{% endblock %}">编排计划</a>
+  <a href="/ui/health" class="{% block nav_health %}{% endblock %}">运行状态</a>
+  <a href="/api/cases" target="_blank">API /api/cases</a>
+  <a href="/metrics" target="_blank">/metrics</a>
+  <span style="margin-left:auto" class="muted">{{ cfg.plan_mode if cfg is defined else "" }}</span>
+</nav>
+<main>{% block body %}{% endblock %}</main>
+</body>
+</html>

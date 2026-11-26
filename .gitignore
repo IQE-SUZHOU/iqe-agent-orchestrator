@@ -1,0 +1,24 @@
+# ── Python 构建/缓存 ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── 运行时产物（不是代码）──
+.plans/
+.run/
+logs/
+*.log
+
+# ── 凭据：绝不进仓库 ──
+deploy/secrets.env
+*.local.env
+.env

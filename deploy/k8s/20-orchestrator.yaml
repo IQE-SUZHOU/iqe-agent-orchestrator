@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: ci-triage
+  labels:
+    app: ci-triage-orchestrator
+    app.kubernetes.io/part-of: ci-triage-demo
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # 单实例驱动 LangGraph checkpoint 线程，避免并发双跑同一 case
+  selector:
+    matchLabels:
+      app: ci-triage-orchestrator
+  template:
+    metadata:
+      labels:
+        app: ci-triage-orchestrator
+        app.kubernetes.io/part-of: ci-triage-demo
+    spec:
+      imagePullSecrets:
+        - name: harbor-pull
+      terminationGracePeriodSeconds: 45
+      # 调度约束：只有 dell-r7625 与 jsd 配了 Harbor 的 insecure registry（HTTP:7777）；
+      # 新节点 d-001-g2-gfx1151 没配 → ErrImagePull("server gave HTTP response to HTTPS client")。
+      # jsd 当前 DiskPressure=True（新建 pod 立刻被 Evicted），所以只用 dell-r7625。
+      # 不改节点配置，用调度约束绕开——生产上应给节点补齐 certs.d 配置。
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - dell-r7625   # 实测：Harbor 可拉 + 无 DiskPressure（jsd 有磁盘压力会被驱逐）
+      containers:
+        - name: orchestrator
+          image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
+          command: ["python", "-m", "orchestrator.main"]
+          envFrom:
+            - configMapRef:
+                name: ci-triage-config
+            - secretRef:
+                name: ci-triage-credentials
+          env:
+            - name: SVC
+              value: orchestrator
+            - name: AMQP_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ci-triage-credentials
+                  key: AMQP_ORCH
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 150m
+              memory: 256Mi
+            limits:
+              cpu: 800m
+              memory: 640Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: work
+              mountPath: /var/lib/ci-triage
+      volumes:
+        - name: work
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ci-triage-ui
+  namespace: ci-triage
+  labels:
+    app: ci-triage-orchestrator
+spec:
+  type: NodePort
+  selector:
+    app: ci-triage-orchestrator
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30099

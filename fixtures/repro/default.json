@@ -1,0 +1,24 @@
+{
+  "reproducible": "yes",
+  "attempts": 2,
+  "matrix": [
+    {
+      "os": "sut-target-os 24.04",
+      "config": "default",
+      "outcome": "fail"
+    },
+    {
+      "os": "sut-target-os 24.04",
+      "config": "default",
+      "outcome": "fail"
+    }
+  ],
+  "steps_summary": [
+    "锁定 sut-gfx1151-01 机位",
+    "以原参数重建 os-staging-test 同参任务",
+    "执行 kernel-mode 用例集（12 例）",
+    "抓取 dmesg 与 console 并做指纹比对",
+    "释放机位并登记制品"
+  ],
+  "log_excerpt": "repro attempt 1: amdgpu GPU page fault at 0x7f10c0000000 vmid 1\nKernel panic - not syncing: Fatal exception in interrupt\n签名族与原始构建一致（driver:crash）\nrepro attempt 2: 同一错误簇复现，dmesg 尾部 Oops 一致"
+}

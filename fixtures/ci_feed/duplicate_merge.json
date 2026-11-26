@@ -1,0 +1,53 @@
+{
+  "job_default": "os-staging-test",
+  "builds": [
+    {
+      "job": "os-staging-test",
+      "number": 1251,
+      "result": "FAILURE",
+      "branch": "master",
+      "duration_s": 311,
+      "started_at": "2026-11-25T07:00:00Z",
+      "log_excerpt": "Started by upstream project os-staging-test #2251\nRunning on sut-gfx1151-01 in /tmp/ws-01f7/os-staging-test\n[stage: userspace-smoke] pytest tests/userspace -q\nFAILED tests/gfx/test_copy_engine.py::test_zero_copy\nAssertionError: 期望 copy_engine 返回 1，实际返回 0（用例断言失败）\n1 个用例失败，11 个用例通过，用时 4.2s\n构建阶段 userspace-smoke 标记为失败\nFinished: FAILURE",
+      "context": {
+        "mock_scenario": "duplicate_merge"
+      }
+    },
+    {
+      "job": "os-staging-test",
+      "number": 1252,
+      "result": "FAILURE",
+      "branch": "master",
+      "duration_s": 298,
+      "started_at": "2026-11-25T07:10:00Z",
+      "log_excerpt": "Started by upstream project os-staging-test #2252\nRunning on sut-gfx1151-02 in /tmp/ws-02f7/os-staging-test\n[stage: userspace-smoke] pytest tests/userspace -q\nFAILED tests/gfx/test_copy_engine.py::test_zero_copy_batch\nAssertionError: 期望 copy_engine 返回 1，实际返回 0（用例断言失败）\n1 个用例失败，11 个用例通过，用时 5.1s\n构建阶段 userspace-smoke 标记为失败\nFinished: FAILURE",
+      "context": {
+        "mock_scenario": "duplicate_merge"
+      }
+    },
+    {
+      "job": "os-staging-image",
+      "number": 1253,
+      "result": "FAILURE",
+      "branch": "master",
+      "duration_s": 276,
+      "started_at": "2026-11-25T07:20:00Z",
+      "log_excerpt": "Started by upstream project os-staging-test #2253\nRunning on builder-07 in /tmp/ws-03f7/os-staging-test\n[stage: userspace-smoke] pytest tests/userspace -q\nFAILED tests/gfx/test_copy_engine.py::test_zero_copy_flush\nAssertionError: 期望 copy_engine 返回 1，实际返回 0（用例断言失败）\n1 个用例失败，11 个用例通过，用时 4.8s\n构建阶段 userspace-smoke 标记为失败\nFinished: FAILURE",
+      "context": {
+        "mock_scenario": "duplicate_merge"
+      }
+    },
+    {
+      "job": "os-staging-test",
+      "number": 1254,
+      "result": "FAILURE",
+      "branch": "master",
+      "duration_s": 322,
+      "started_at": "2026-11-25T07:30:00Z",
+      "log_excerpt": "Started by upstream project os-staging-test #2254\nRunning on sut-gfx1151-03 in /tmp/ws-04f7/os-staging-test\n[stage: userspace-smoke] pytest tests/userspace -q\nFAILED tests/gfx/test_copy_engine.py::test_zero_copy_stress\nAssertionError: 期望 copy_engine 返回 1，实际返回 0（用例断言失败）\n1 个用例失败，11 个用例通过，用时 6.0s\n构建阶段 userspace-smoke 标记为失败\nFinished: FAILURE",
+      "context": {
+        "mock_scenario": "duplicate_merge"
+      }
+    }
+  ]
+}

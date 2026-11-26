@@ -1,0 +1,18 @@
+{
+  "job_default": "os-staging-test",
+  "builds": [
+    {
+      "job": "os-staging-test",
+      "number": 1261,
+      "result": "UNSTABLE",
+      "branch": "master",
+      "duration_s": 340,
+      "started_at": "2026-11-25T08:00:00Z",
+      "log_excerpt": "Started by upstream project os-staging-test #2261\nRunning on sut-gfx1151-02 (locked) in /tmp/ws-30aa/os-staging-test\n[stage: kernel-mode-suite] 运行 gfx1151 resume 用例集（8 例）\namdgpu 0000:61:00.0: GPU page fault at 0x7f11a0000000, vmid 2（第 3 次运行出现）\namdgpu: VM fault on ring gfx_0 出现后立即恢复，其余 7 例正常结束\ndmesg 尾部：Oops 仅在本次运行出现，前两次同参运行均正常\n稳定性看板：同一签名族近 10 次出现 4 次（判定为不稳定）\nFinished: UNSTABLE",
+      "context": {
+        "mock_scenario": "flaky",
+        "failed_stage": "kernel-mode-suite"
+      }
+    }
+  ]
+}

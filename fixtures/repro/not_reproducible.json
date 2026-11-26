@@ -1,0 +1,23 @@
+{
+  "reproducible": "no",
+  "attempts": 2,
+  "blocked_reason": "干净环境两次均通过",
+  "matrix": [
+    {
+      "os": "sut-target-os 24.04",
+      "config": "clean",
+      "outcome": "pass"
+    },
+    {
+      "os": "sut-target-os 24.04",
+      "config": "clean",
+      "outcome": "pass"
+    }
+  ],
+  "steps_summary": [
+    "重装干净系统镜像",
+    "同参重建两次",
+    "两次均通过，未观测到原错误簇"
+  ],
+  "log_excerpt": "repro attempt 1: 全部用例通过\nrepro attempt 2: 全部用例通过，无错误簇"
+}

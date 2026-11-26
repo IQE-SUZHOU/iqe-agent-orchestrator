@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block nav_plans %}class="on"{% endblock %}
+{% block title %}编排计划 · CI Triage{% endblock %}
+{% block body %}
+<h2>Workflow 注册表（人工定义，PR 评审后生效；优先级高者胜）</h2>
+<table>
+  <tr><th>Key</th><th>标题</th><th>启用</th><th>优先级</th><th>匹配条件</th><th>步骤序列</th></tr>
+  {% for w in workflows %}
+  <tr><td><b>{{ w.key }}</b></td><td>{{ w.title }}</td>
+      <td>{{ '是' if w.enabled else '否' }}</td><td>{{ w.priority }}</td>
+      <td class="small">{{ w.match }}</td>
+      <td class="small">{% for st in w.steps %}{{ st.id }}:{{ st.stage }}:{{ st.mode }}{% if not loop.last %} → {% endif %}{% endfor %}</td></tr>
+  {% endfor %}
+</table>
+
+<h2>已封存计划（workflow 与 LLM 同契约，执行期不再调用模型）</h2>
+<table>
+  <tr><th>plan_id</th><th>Case</th><th>来源</th><th>degraded</th><th>步骤</th><th>rationale</th><th>文件 / sha256</th></tr>
+  {% for p in plans %}
+  <tr>
+    <td class="small">{{ p.plan_id }}</td>
+    <td>{% if p.case_id %}<a class="case" href="/ui/cases/{{ p.case_id }}">{{ p.case_id[:10] }}…</a>{% else %}-{% endif %}</td>
+    <td><span class="tag t-{{ p.source }}">{{ p.source }}</span>
+        <span class="muted small">{{ p.workflow_key or '' }}</span></td>
+    <td>{{ '是' if p.degraded else '否' }}</td>
+    <td class="small">{% for st in p.steps %}{{ st.get('id') }}:{{ st.get('stage') }}:{{ st.get('mode') }}
+        {% if st.get('on') %}(on){% endif %}{% if not loop.last %} → {% endif %}{% endfor %}</td>
+    <td class="small">{{ (p.rationale or '')[:160] }}</td>
+    <td class="small">{{ p.file_path }}<br>{{ (p.yaml_sha256 or '')[:16] }}</td>
+  </tr>
+  {% endfor %}
+  {% if not plans %}<tr><td colspan="7" class="muted">尚无计划</td></tr>{% endif %}
+</table>
+{% endblock %}

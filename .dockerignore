@@ -1,0 +1,12 @@
+.venv/
+**/__pycache__/
+*.pyc
+tests/
+deploy/
+design/
+.pytest_cache/
+
+.run/
+.plans/
+logs/
+.run

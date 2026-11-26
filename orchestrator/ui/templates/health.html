@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block nav_health %}class="on"{% endblock %}
+{% block title %}运行状态 · CI Triage{% endblock %}
+{% block body %}
+<h2>Stage 执行情况</h2>
+<table>
+  <tr><th>Stage</th><th>结果</th><th>次数</th><th>平均耗时</th><th>最大耗时</th></tr>
+  {% for r in rows %}
+  <tr><td>{{ r.stage }}</td>
+      <td><span class="tag {% if r.status=='done' %}t-closed{% elif r.status in ('blocked','timeout','failed') %}t-blocked{% else %}t-created{% endif %}">{{ r.status }}</span></td>
+      <td>{{ r.n }}</td><td>{{ r.avg_ms or '-' }} ms</td><td>{{ r.max_ms or '-' }} ms</td></tr>
+  {% endfor %}
+</table>
+
+<h2>DLQ 归档（nack(requeue=false) 的毒消息）</h2>
+<table>
+  <tr><th>#</th><th>Stage</th><th>幂等键</th><th>原因</th><th>原文</th></tr>
+  {% for d in dlq["items"] %}
+  <tr><td>{{ d.id }}</td><td>{{ d.stage }}</td><td class="small">{{ d.idempotency_key }}</td>
+      <td class="small">{{ d.reason }}</td><td class="small">{{ (d.body or '')[:240] }}</td></tr>
+  {% endfor %}
+  {% if not dlq["items"] %}<tr><td colspan="5" class="muted">空</td></tr>{% endif %}
+</table>
+
+<h2>进程内计数器</h2>
+<pre>{{ counters }}</pre>
+<script>setTimeout(()=>location.reload(),4000);</script>
+{% endblock %}

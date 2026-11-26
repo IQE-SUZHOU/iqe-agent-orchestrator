@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block nav_index %}class="on"{% endblock %}
+{% block title %}任务总览 · CI Triage{% endblock %}
+{% block body %}
+<div class="kpis">
+  <div class="kpi"><i>Case 总数</i><b>{{ stats.cases }}</b></div>
+  <div class="kpi"><i>Stage 执行记录</i><b>{{ stats.stage_runs }}</b></div>
+  <div class="kpi"><i>已封存计划</i><b>{{ stats.plans }}</b></div>
+  <div class="kpi"><i>证据条目</i><b>{{ stats.evidence }}</b></div>
+  <div class="kpi"><i>DLQ 归档</i><b style="color:var(--err)">{{ stats.dlq }}</b></div>
+</div>
+
+<div class="card" style="margin-top:14px">
+  <b>触发 Monitor 扫描（手动）</b>
+  <div class="row" style="margin-top:8px">
+    <select id="scenario">
+      {% for s in scenarios %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+      <option value="source_unavailable">source_unavailable（故意无夹具 → blocked）</option>
+    </select>
+    <input id="lookback" value="24h" size="8">
+    <button onclick="scan()">执行扫描</button>
+    <button onclick="daily()">生成今日日报</button>
+    <label class="muted"><input type="checkbox" id="auto" checked> 3 秒自动刷新</label>
+    <span id="msg" class="muted"></span>
+  </div>
+  <div class="muted small" style="margin-top:6px">
+    可用剧本：{{ scenarios|join(' · ') }}　（剧本决定 Monitor 看到的构建流水；下游 Agent 的剧本由 Case 的 scenario_hint 决定）
+  </div>
+</div>
+
+<h2>Case 列表（含编排计划与当前进度）</h2>
+<table>
+  <tr><th>Case</th><th>信号</th><th>Job / Build</th><th>状态</th><th>计划来源</th><th>计划进度</th><th>创建时间</th></tr>
+  {% for c in cases %}
+  {% set pr = c.progress or {} %}
+  <tr>
+    <td><a class="case" href="/ui/cases/{{ c.case_id }}">{{ c.case_id[:13] }}…</a></td>
+    <td><span class="tag t-{{ c.signal }}">{{ c.signal }}</span></td>
+    <td>{{ c.job }}{% if c.build %} #{{ c.build }}{% endif %}
+        <div class="muted small">{{ c.signature or '' }}</div></td>
+    <td><span class="tag t-{{ c.status }}">{{ c.status }}</span>
+        {% if c.blocked_reason %}<div class="muted small">{{ c.blocked_reason[:90] }}</div>{% endif %}</td>
+    <td><span class="tag t-{{ c.plan_source or 'none' }}">{{ c.plan_source or '-' }}</span>
+        <span class="muted small">{{ c.workflow_key or '' }}{{ ' (degraded)' if pr.get('degraded') }}</span></td>
+    <td>
+      <div class="steps">
+        {% set steps = pr.get('plan_steps') or [] %}
+        {% for st in steps %}
+          {% set stt = (pr.get('step_status') or {}).get(st.id, '') %}
+          <span class="tag {% if stt=='done' %}t-closed{% elif stt=='blocked' %}t-blocked{% else %}t-created{% endif %}"
+                title="attempt={{ (pr.get('attempts') or {}).get(st.id, 0) }}">{{ st.stage }}{% if stt %}:{{ stt }}{% endif %}</span>
+        {% endfor %}
+        {% if not steps %}<span class="muted small">计划未封存</span>{% endif %}
+      </div>
+      {% if pr.get('review_loop_seq') %}<div class="muted small">回炉轮次 {{ pr.review_loop_seq }}</div>{% endif %}
+    </td>
+    <td class="muted small">{{ c.created_at.strftime('%m-%d %H:%M:%S') }}</td>
+  </tr>
+  {% endfor %}
+  {% if not cases %}<tr><td colspan="7" class="muted">还没有 Case — 用上面的「执行扫描」触发一轮</td></tr>{% endif %}
+</table>
+
+<div class="grid" style="margin-top:18px">
+  <div>
+    <h2>最近扫描</h2>
+    <table>
+      <tr><th>Scan</th><th>剧本</th><th>状态</th><th>计数 observed/promoted/suppressed/cases</th></tr>
+      {% for s in scans %}
+      <tr><td class="small">{{ s.scan_id[:13] }}…</td><td>{{ s.scenario }}</td>
+          <td><span class="tag {% if s.status=='done' %}t-closed{% else %}t-{{ s.status }}{% endif %}">{{ s.status }}</span></td>
+          <td class="small">{{ s.counts.get('observed',0) }} / {{ s.counts.get('promoted', s.counts.get('errors_promoted',0)) }} /
+              {{ s.counts.get('suppressed',0) }} / {{ s.counts.get('cases_created',0) }}</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+  <div>
+    <h2>Workflow 注册表（人工定义，优先于 LLM）</h2>
+    <table>
+      <tr><th>Key</th><th>优先级</th><th>匹配</th><th>步骤</th></tr>
+      {% for w in workflows %}
+      <tr><td><b>{{ w.key }}</b><div class="muted small">{{ w.title }}</div></td><td>{{ w.priority }}</td>
+          <td class="small">{{ w.match }}</td>
+          <td class="small">{% for st in w.steps %}{{ st.stage }}:{{ st.mode }}{% if not loop.last %} → {% endif %}{% endfor %}</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+</div>
+
+<script>
+async function scan(){
+  const body={scenario:document.getElementById('scenario').value,
+              lookback:document.getElementById('lookback').value, wait:true};
+  document.getElementById('msg').textContent='扫描中…';
+  const r=await fetch('/api/scan',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+  const d=await r.json();
+  document.getElementById('msg').textContent=`scan=${(d.scan_id||'').slice(0,10)} status=${d.status} `+
+    `observed=${d.counts.observed} promoted=${d.counts.errors_promoted||d.counts.promoted} `+
+    `suppressed=${d.counts.suppressed} cases=${(d.cases||[]).length}`;
+  setTimeout(()=>location.reload(),1500);
+}
+async function daily(){
+  const r=await fetch('/api/report/daily',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});
+  const d=await r.json();
+  document.getElementById('msg').textContent=`日报 dispatch=${d.status} day=${d.day}`;
+}
+setInterval(()=>{ if(document.getElementById('auto').checked && !document.hidden) location.reload(); },3000);
+</script>
+{% endblock %}

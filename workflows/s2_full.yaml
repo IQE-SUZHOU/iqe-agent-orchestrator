@@ -1,0 +1,29 @@
+key: s2_full
+title: 新失败完整链：分类→复现→工单→复核→案例报告
+enabled: true
+priority: 100
+version: 1
+match:
+  signal: error
+  job_not_pattern: "llm-plan-demo"
+steps:
+  - id: t1
+    stage: triage
+    mode: full
+  - id: r1
+    stage: reproduction
+    mode: run
+    timeout_s: 20
+  - id: k1
+    stage: ticket
+    mode: run
+  - id: v1
+    stage: review
+    mode: run
+    "on":
+      approve: { next: p1 }
+      needs_info: { jump: t1, max_loops: 2, set_status: triaged }
+      reject: { end: true, set_status: closed_rejected }
+  - id: p1
+    stage: reporting
+    mode: case

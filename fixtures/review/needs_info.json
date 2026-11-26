@@ -1,0 +1,17 @@
+{
+  "quality_weights": {
+    "evidence": 0.4,
+    "repro": 0.3,
+    "consistency": 0.3
+  },
+  "notes": "Mock 复核说明：第 1 轮要求补充复现记录（只影响第一轮，回炉后按机械预检判定）",
+  "override": {
+    "verdict": "needs_info",
+    "reason_code": "missing_repro",
+    "first_loop_only": true,
+    "requested_info": [
+      "补充受控重跑记录与 reproducible 结论",
+      "给出 dmesg 完整失败段（含 Oops 首行）"
+    ]
+  }
+}

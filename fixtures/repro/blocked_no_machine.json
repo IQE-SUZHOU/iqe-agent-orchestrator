@@ -1,0 +1,7 @@
+{
+  "raise_blocked": {
+    "code": "source_unavailable",
+    "detail": "重跑机位被占用（Mock）"
+  },
+  "note": "锁机桩返回占用，用于验证 blocked → DLQ/人工路径"
+}

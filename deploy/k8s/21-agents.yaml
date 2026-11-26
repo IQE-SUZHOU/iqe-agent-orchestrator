@@ -1,0 +1,540 @@
+# 6 个 Agent：各自独立 Deployment / 独立账号 / 独立队列，互不直连（星型拓扑，只经编排层）
+# 同一个镜像不同 command —— 已在 design/05 记录为可接受的演示偏离
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-monitor
+  namespace: ci-triage
+  labels:
+    app: ci-triage-agent
+    stage: monitor
+    app.kubernetes.io/part-of: ci-triage-demo
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ci-triage-agent
+      stage: monitor
+  template:
+    metadata:
+      labels:
+        app: ci-triage-agent
+        stage: monitor
+        app.kubernetes.io/part-of: ci-triage-demo
+    spec:
+      imagePullSecrets:
+        - name: harbor-pull
+      # 调度约束：只有 dell-r7625 与 jsd 配了 Harbor 的 insecure registry（HTTP:7777）；
+      # 新节点 d-001-g2-gfx1151 没配 → ErrImagePull("server gave HTTP response to HTTPS client")。
+      # jsd 当前 DiskPressure=True（新建 pod 立刻被 Evicted），所以只用 dell-r7625。
+      # 不改节点配置，用调度约束绕开——生产上应给节点补齐 certs.d 配置。
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - dell-r7625   # 实测：Harbor 可拉 + 无 DiskPressure（jsd 有磁盘压力会被驱逐）
+      containers:
+        - name: agent-monitor
+          image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
+          command: ["python", "-m", "agents.monitor.main"]
+          envFrom:
+            - configMapRef:
+                name: ci-triage-config
+            - secretRef:
+                name: ci-triage-credentials
+          env:
+            - name: SVC
+              value: agent-monitor
+            - name: AMQP_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ci-triage-credentials
+                  key: AMQP_MONITOR
+            - name: NOISE_THRESHOLD
+              value: "0.85"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 320Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: work
+              mountPath: /var/lib/ci-triage
+      volumes:
+        - name: work
+          emptyDir: {}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-triage
+  namespace: ci-triage
+  labels:
+    app: ci-triage-agent
+    stage: triage
+    app.kubernetes.io/part-of: ci-triage-demo
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ci-triage-agent
+      stage: triage
+  template:
+    metadata:
+      labels:
+        app: ci-triage-agent
+        stage: triage
+        app.kubernetes.io/part-of: ci-triage-demo
+    spec:
+      imagePullSecrets:
+        - name: harbor-pull
+      # 调度约束：只有 dell-r7625 与 jsd 配了 Harbor 的 insecure registry（HTTP:7777）；
+      # 新节点 d-001-g2-gfx1151 没配 → ErrImagePull("server gave HTTP response to HTTPS client")。
+      # jsd 当前 DiskPressure=True（新建 pod 立刻被 Evicted），所以只用 dell-r7625。
+      # 不改节点配置，用调度约束绕开——生产上应给节点补齐 certs.d 配置。
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - dell-r7625   # 实测：Harbor 可拉 + 无 DiskPressure（jsd 有磁盘压力会被驱逐）
+      containers:
+        - name: agent-triage
+          image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
+          command: ["python", "-m", "agents.triage.main"]
+          envFrom:
+            - configMapRef:
+                name: ci-triage-config
+            - secretRef:
+                name: ci-triage-credentials
+          env:
+            - name: SVC
+              value: agent-triage
+            - name: AMQP_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ci-triage-credentials
+                  key: AMQP_TRIAGE
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 320Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: work
+              mountPath: /var/lib/ci-triage
+      volumes:
+        - name: work
+          emptyDir: {}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-reproduction
+  namespace: ci-triage
+  labels:
+    app: ci-triage-agent
+    stage: reproduction
+    app.kubernetes.io/part-of: ci-triage-demo
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ci-triage-agent
+      stage: reproduction
+  template:
+    metadata:
+      labels:
+        app: ci-triage-agent
+        stage: reproduction
+        app.kubernetes.io/part-of: ci-triage-demo
+    spec:
+      imagePullSecrets:
+        - name: harbor-pull
+      # 调度约束：只有 dell-r7625 与 jsd 配了 Harbor 的 insecure registry（HTTP:7777）；
+      # 新节点 d-001-g2-gfx1151 没配 → ErrImagePull("server gave HTTP response to HTTPS client")。
+      # jsd 当前 DiskPressure=True（新建 pod 立刻被 Evicted），所以只用 dell-r7625。
+      # 不改节点配置，用调度约束绕开——生产上应给节点补齐 certs.d 配置。
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - dell-r7625   # 实测：Harbor 可拉 + 无 DiskPressure（jsd 有磁盘压力会被驱逐）
+      containers:
+        - name: agent-reproduction
+          image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
+          command: ["python", "-m", "agents.reproduction.main"]
+          envFrom:
+            - configMapRef:
+                name: ci-triage-config
+            - secretRef:
+                name: ci-triage-credentials
+          env:
+            - name: SVC
+              value: agent-reproduction
+            - name: AMQP_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ci-triage-credentials
+                  key: AMQP_REPRODUCTION
+            - name: REPRO_MAX_RUNS
+              value: "3"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 320Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: work
+              mountPath: /var/lib/ci-triage
+      volumes:
+        - name: work
+          emptyDir: {}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-ticket
+  namespace: ci-triage
+  labels:
+    app: ci-triage-agent
+    stage: ticket
+    app.kubernetes.io/part-of: ci-triage-demo
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ci-triage-agent
+      stage: ticket
+  template:
+    metadata:
+      labels:
+        app: ci-triage-agent
+        stage: ticket
+        app.kubernetes.io/part-of: ci-triage-demo
+    spec:
+      imagePullSecrets:
+        - name: harbor-pull
+      # 调度约束：只有 dell-r7625 与 jsd 配了 Harbor 的 insecure registry（HTTP:7777）；
+      # 新节点 d-001-g2-gfx1151 没配 → ErrImagePull("server gave HTTP response to HTTPS client")。
+      # jsd 当前 DiskPressure=True（新建 pod 立刻被 Evicted），所以只用 dell-r7625。
+      # 不改节点配置，用调度约束绕开——生产上应给节点补齐 certs.d 配置。
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - dell-r7625   # 实测：Harbor 可拉 + 无 DiskPressure（jsd 有磁盘压力会被驱逐）
+      containers:
+        - name: agent-ticket
+          image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
+          command: ["python", "-m", "agents.ticket.main"]
+          envFrom:
+            - configMapRef:
+                name: ci-triage-config
+            - secretRef:
+                name: ci-triage-credentials
+          env:
+            - name: SVC
+              value: agent-ticket
+            - name: AMQP_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ci-triage-credentials
+                  key: AMQP_TICKET
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 320Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: work
+              mountPath: /var/lib/ci-triage
+      volumes:
+        - name: work
+          emptyDir: {}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-review
+  namespace: ci-triage
+  labels:
+    app: ci-triage-agent
+    stage: review
+    app.kubernetes.io/part-of: ci-triage-demo
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ci-triage-agent
+      stage: review
+  template:
+    metadata:
+      labels:
+        app: ci-triage-agent
+        stage: review
+        app.kubernetes.io/part-of: ci-triage-demo
+    spec:
+      imagePullSecrets:
+        - name: harbor-pull
+      # 调度约束：只有 dell-r7625 与 jsd 配了 Harbor 的 insecure registry（HTTP:7777）；
+      # 新节点 d-001-g2-gfx1151 没配 → ErrImagePull("server gave HTTP response to HTTPS client")。
+      # jsd 当前 DiskPressure=True（新建 pod 立刻被 Evicted），所以只用 dell-r7625。
+      # 不改节点配置，用调度约束绕开——生产上应给节点补齐 certs.d 配置。
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - dell-r7625   # 实测：Harbor 可拉 + 无 DiskPressure（jsd 有磁盘压力会被驱逐）
+      containers:
+        - name: agent-review
+          image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
+          command: ["python", "-m", "agents.review.main"]
+          envFrom:
+            - configMapRef:
+                name: ci-triage-config
+            - secretRef:
+                name: ci-triage-credentials
+          env:
+            - name: SVC
+              value: agent-review
+            - name: AMQP_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ci-triage-credentials
+                  key: AMQP_REVIEW
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 320Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: work
+              mountPath: /var/lib/ci-triage
+      volumes:
+        - name: work
+          emptyDir: {}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-reporting
+  namespace: ci-triage
+  labels:
+    app: ci-triage-agent
+    stage: reporting
+    app.kubernetes.io/part-of: ci-triage-demo
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ci-triage-agent
+      stage: reporting
+  template:
+    metadata:
+      labels:
+        app: ci-triage-agent
+        stage: reporting
+        app.kubernetes.io/part-of: ci-triage-demo
+    spec:
+      imagePullSecrets:
+        - name: harbor-pull
+      # 调度约束：只有 dell-r7625 与 jsd 配了 Harbor 的 insecure registry（HTTP:7777）；
+      # 新节点 d-001-g2-gfx1151 没配 → ErrImagePull("server gave HTTP response to HTTPS client")。
+      # jsd 当前 DiskPressure=True（新建 pod 立刻被 Evicted），所以只用 dell-r7625。
+      # 不改节点配置，用调度约束绕开——生产上应给节点补齐 certs.d 配置。
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - dell-r7625   # 实测：Harbor 可拉 + 无 DiskPressure（jsd 有磁盘压力会被驱逐）
+      containers:
+        - name: agent-reporting
+          image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
+          command: ["python", "-m", "agents.reporting.main"]
+          envFrom:
+            - configMapRef:
+                name: ci-triage-config
+            - secretRef:
+                name: ci-triage-credentials
+          env:
+            - name: SVC
+              value: agent-reporting
+            - name: AMQP_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ci-triage-credentials
+                  key: AMQP_REPORTING
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 320Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: work
+              mountPath: /var/lib/ci-triage
+      volumes:
+        - name: work
+          emptyDir: {}

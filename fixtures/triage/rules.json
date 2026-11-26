@@ -1,0 +1,30 @@
+{
+  "component_to_rca": {
+    "ci-infra": "infrastructure",
+    "driver": "driver",
+    "test": "test",
+    "network": "environment",
+    "apt-repo": "environment",
+    "image-build": "environment",
+    "install": "environment",
+    "toolchain": "environment",
+    "timeout": "environment",
+    "unknown": "unknown"
+  },
+  "os_stage_map": {
+    "os-staging-image": "staging-image-build",
+    "os-staging-install": "staging-install",
+    "os-staging-boot": "staging-boot",
+    "os-staging-test": "staging-test"
+  },
+  "confidence_by_component": {
+    "driver": 0.82,
+    "test": 0.76,
+    "environment": 0.68,
+    "infrastructure": 0.88,
+    "unknown": 0.3
+  },
+  "no_repro_rca": [
+    "infrastructure"
+  ]
+}

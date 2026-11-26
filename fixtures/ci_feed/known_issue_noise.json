@@ -1,0 +1,41 @@
+{
+  "job_default": "os-staging-image",
+  "builds": [
+    {
+      "job": "apt-mirror-sync",
+      "number": 1231,
+      "result": "FAILURE",
+      "branch": "master",
+      "duration_s": 66,
+      "started_at": "2026-11-25T05:00:00Z",
+      "log_excerpt": "Started by timer (index-refresh)\nRunning on builder-09 in /tmp/ws-1a55/apt-mirror-sync\n[stage: fetch-repo] E:Failed to fetch http://repo.internal/ubuntu/dists/stable/Release  404 Not Found [IP: 10.20.30.7 80]\n[stage: fetch-repo] Packages index 拉取失败：Packages index for stable is corrupt\n构建机出口链路抖动：network unreachable（proxy-01 会话被重置）\n结论：与本次代码变更无关，索引同步未完成（近 14 天已出现 11 次）\n运维备注：infra 公告 2026-11-21 已记录同一告警\nFinished: FAILURE",
+      "context": {
+        "mock_scenario": "known_issue_noise"
+      }
+    },
+    {
+      "job": "os-staging-install",
+      "number": 1232,
+      "result": "FAILURE",
+      "branch": "master",
+      "duration_s": 71,
+      "started_at": "2026-11-25T05:02:00Z",
+      "log_excerpt": "Started by timer (nightly-apt-warming)\nRunning on builder-12 in /tmp/ws-64cf/os-staging-install\n[stage: refresh-apt-index] apt-get update 失败：Unable to connect to repo.internal http (network unreachable)\n[stage: refresh-apt-index] Release file 校验失败（远端返回 404）\n构建机网络不可达持续 62s，索引阶段中止\n运维备注：外网代理抖动导致索引不可达，属于环境侧已知问题\nFinished: FAILURE",
+      "context": {
+        "mock_scenario": "known_issue_noise"
+      }
+    },
+    {
+      "job": "os-staging-image",
+      "number": 1233,
+      "result": "FAILURE",
+      "branch": "master",
+      "duration_s": 83,
+      "started_at": "2026-11-25T05:04:00Z",
+      "log_excerpt": "Started by timer (nightly-apt-warming)\nRunning on builder-12 in /tmp/ws-64cf/os-staging-image\n[stage: refresh-apt-index] apt-get update 失败：Could not resolve repo.internal (dns 服务无响应)\n[stage: refresh-apt-index] E:Failed to fetch …/Release 404 Not Found\n构建机 network unreachable 持续 90s，索引阶段中止\n运维备注：同一告警已由 infra 团队跟踪\nFinished: FAILURE",
+      "context": {
+        "mock_scenario": "known_issue_noise"
+      }
+    }
+  ]
+}

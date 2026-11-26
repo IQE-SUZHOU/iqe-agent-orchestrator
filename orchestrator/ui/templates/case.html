@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Case {{ case.case_id[:10] }} · CI Triage{% endblock %}
+{% block body %}
+{% set pr = case.progress or {} %}
+<div class="card">
+  <div class="row" style="justify-content:space-between">
+    <div>
+      <b style="font-family:ui-monospace,monospace">{{ case.case_id }}</b>
+      <span class="tag t-{{ case.signal }}">{{ case.signal }}</span>
+      <span class="tag t-{{ case.status }}">{{ case.status }}</span>
+      {% if pr.get('review_loop_seq') %}<span class="tag t-closed_rejected">回炉 {{ pr.review_loop_seq }} 轮</span>{% endif %}
+      <div class="muted small">{{ case.job }}{% if case.build %} #{{ case.build }}{% endif %} · 签名 {{ case.signature or '-' }}
+        {% if case.scenario_hint %}· Agent 剧本 {{ case.scenario_hint }}{% endif %}</div>
+      {% if case.blocked_reason %}<div class="small" style="color:var(--err)">blocked：{{ case.blocked_reason }}</div>{% endif %}
+    </div>
+    <div class="row">
+      <button onclick="replay()">重跑此 Case</button>
+      <a href="/api/cases/{{ case.case_id }}/plan.yaml" target="_blank"><button>下载 plan.yaml</button></a>
+      <a href="/"><button>返回</button></a>
+    </div>
+  </div>
+</div>
+
+<h2>编排计划（{{ pr.get('plan_source') or '未封存' }}{% if pr.get('workflow_key') %} · workflow={{ pr.workflow_key }}{% endif %}{% if pr.get('degraded') %} · degraded 安全网{% endif %}）</h2>
+<div class="card">
+  <div class="steps">
+    {% for st in steps %}
+      {% set stt = step_status.get(st.id, '') %}
+      {% set cur = 'current' if loop.index0 == (pr.get('cursor', 0)) and not pr.get('finished_at') else '' %}
+      <div class="step {{ stt }} {{ cur }}">
+        <div class="id">{{ st.id }} · attempt {{ attempts.get(st.id,0) }}/{{ st.max_attempts or 2 }}</div>
+        <b>{{ st.stage }}</b> <span class="muted small">{{ st.mode }}</span>
+        <div class="small {% if stt=='done' %}muted{% endif %}"
+             style="color:{% if stt=='done' %}var(--ok){% elif stt=='blocked' %}var(--err){% else %}var(--dim){% endif %}">
+          {{ stt or '待执行' }}</div>
+        {% if st.on %}<div class="muted small">on: {{ st.on|e }}</div>{% endif %}
+      </div>
+      {% if not loop.last %}<span class="arrow">→</span>{% endif %}
+    {% endfor %}
+    {% if not steps %}<span class="muted">该 Case 没有封存计划（计划校验失败）</span>{% endif %}
+  </div>
+  {% if plan %}<div class="muted small" style="margin-top:8px">plan_id={{ plan.plan_id }} · validator={{ plan.validator }}
+     · sha256={{ (plan.yaml_sha256 or '')[:12] }} · 文件 {{ plan.file_path }}</div>
+    <div class="muted small">rationale：{{ plan.rationale or '-' }} · model={{ plan.model or '-' }}</div>{% endif %}
+</div>
+
+<div class="grid">
+  <div>
+    <h2>执行轨迹（stage_runs，同一 correlation_id）</h2>
+    <table>
+      <tr><th>Stage</th><th>Step</th><th>Att</th><th>状态</th><th>耗时</th><th>关键输出</th></tr>
+      {% for r in trace %}
+      <tr>
+        <td>{{ r.stage }}{% if r.scan_id %}<div class="muted small">scan</div>{% endif %}</td>
+        <td class="small">{{ r.step_id }}</td><td>{{ r.attempt }}</td>
+        <td><span class="tag {% if r.status=='done' %}t-closed{% elif r.status in ('blocked','timeout','failed') %}t-blocked{% else %}t-created{% endif %}">{{ r.status }}</span></td>
+        <td class="small">{{ r.latency_ms if r.latency_ms is not none else '-' }} ms</td>
+        <td class="small">
+          {% if r.output %}
+            {% if r.output.get('rca') %}rca={{ r.output.rca }}{% endif %}
+            {% if r.output.get('reproducible') %} · repro={{ r.output.reproducible }}{% endif %}
+            {% if r.output.get('verdict') %} · verdict={{ r.output.verdict }}({{ r.output.reason_code }}){% endif %}
+            {% if r.output.get('ticket_status') %} · ticket={{ r.output.ticket_status }} {{ r.output.external_key or '' }}{% endif %}
+            {% if r.output.get('counts') %}counts={{ r.output.counts }}{% endif %}
+          {% elif r.error %}<span style="color:var(--err)">{{ r.error.code }}: {{ (r.error.detail or '')[:120] }}</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+
+    <h2>复核结论</h2>
+    {% for rv in reviews %}
+    <div class="evi"><b>第 {{ rv.loop_seq }} 轮：{{ rv.verdict }}</b>
+      <span class="muted small">{{ rv.reason_code }}</span>
+      {% if rv.requested_info %}<div class="muted small">要求补充：{{ rv.requested_info|join('；') }}</div>{% endif %}
+      <div class="small">{% for c in rv.checks %}<span class="tag {{ 't-closed' if c.pass else 't-blocked' }}">{{ c.id }}.{{ c.name }}</span> {% endfor %}</div>
+    </div>
+    {% endfor %}
+    {% if not reviews %}<div class="muted small">无复核记录</div>{% endif %}
+
+    <h2>工单</h2>
+    {% for tk in tickets %}
+    <div class="evi"><b>{{ tk.external_key or '-' }}</b> · {{ tk.ticket_status }} · {{ tk.ticket_priority }} · {{ tk.assignee_team }}
+      <div class="muted small">{{ tk.backend }} · {{ tk.url or '' }}{% if tk.duplicate_of %} · 重复于 {{ tk.duplicate_of }}{% endif %}</div></div>
+    {% endfor %}
+    {% if not tickets %}<div class="muted small">无工单</div>{% endif %}
+  </div>
+
+  <div>
+    <h2>证据链（{{ evidence|length }} 条）</h2>
+    {% for e in evidence %}
+    <div class="evi"><b>{{ e.stage }} · {{ e.kind }}</b> <span class="muted small">{{ e.uri }} · {{ e.created_at.strftime('%H:%M:%S') }}</span>
+      <p>{{ e.excerpt }}</p></div>
+    {% endfor %}
+    {% if not evidence %}<div class="muted small">无证据</div>{% endif %}
+
+    <h2>计划原文（封存 YAML）</h2>
+    <pre>{{ plan_yaml or '（无）' }}</pre>
+
+    <h2>Case 载荷（Monitor 观测）</h2>
+    <pre>{{ json(case.payload, ensure_ascii=False, indent=1)[:2500] }}</pre>
+  </div>
+</div>
+
+<script>
+async function replay(){
+  const r=await fetch('/api/cases/{{ case.case_id }}/replay',{method:'POST'});
+  const d=await r.json(); alert('replay gen='+d.gen); location.reload();
+}
+</script>
+{% endblock %}
