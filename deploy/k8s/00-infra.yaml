@@ -21,10 +21,9 @@ data:
   HTTP_PORT: "8080"
   LOG_LEVEL: info
   LOG_JSON: "true"
-  SCHEMAS_DIR: /app/schemas
-  FIXTURES_DIR: /app/fixtures
-  WORKFLOWS_DIR: /app/workflows
-  PLANS_DIR: /var/lib/ci-triage/plans
+  # schemas / workflows / fixtures 的默认位置在包内 <pkg>/common/data/（pip 安装即到位），
+  # 需要覆盖时再设 DATA_DIR 或 SCHEMAS_DIR / FIXTURES_DIR / WORKFLOWS_DIR
+  PLANS_DIR: /var/lib/ci-triage/plans   # 可写：封存计划（emptyDir 挂载）
   PLAN_MODE: auto
   MOCK_LLM_ENABLED: "true"
   MOCK_DELAY_MS: "150:500"

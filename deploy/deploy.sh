@@ -33,8 +33,8 @@ CONTENT_HASH="${CONTENT_HASH:-$(git ls-files -z 2>/dev/null | sort -z | xargs -0
 TAG="${TAG:-$(date +%Y%m%d-%H%M)-${GIT_SHA}-${CONTENT_HASH}}"
 
 echo "== 1) 离线自检（不需要 broker / DB）"
-$PY tools/selfcheck_agents.py
-$PY -c "import agentkit.bus, agentkit.db, orchestrator.app, orchestrator.graph; print('import OK')"
+$PY -m iqe_agents.tools.selfcheck
+$PY -c "import iqe_orchestrator.app, iqe_orchestrator.graph, iqe_agents.runtime; print('import OK')"
 
 echo "== 2) 构建并推送镜像"
 docker build -t "$REPO:$TAG" .
@@ -44,8 +44,8 @@ echo "digest: $(docker inspect --format='{{index .RepoDigests 0}}' "$REPO:$TAG")
 echo "== 3) 前置：vhost /ci + 7 个账号 + 目标数据库"
 kubectl -n infra-database port-forward svc/rabbitmq 15690:15672 >/dev/null 2>&1 &
 PF=$!; trap 'kill $PF 2>/dev/null || true' EXIT; sleep 2
-$PY tools/setup_broker.py --mgmt http://127.0.0.1:15690
-PG_DSN="$PG_ADMIN" $PY -c "import asyncio; from orchestrator.migrate import ensure_database; asyncio.run(ensure_database())"
+$PY -m iqe_orchestrator.tools.setup_broker --mgmt http://127.0.0.1:15690
+PG_DSN="$PG_ADMIN" $PY -c "import asyncio; from iqe_orchestrator.migrate import ensure_database; asyncio.run(ensure_database())"
 
 echo "== 4) 生成 Secret（凭证来源：deploy/secrets.env）"
 kubectl -n "$NS" create secret docker-registry harbor-pull \

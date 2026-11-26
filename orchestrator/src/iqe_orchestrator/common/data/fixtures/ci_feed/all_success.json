@@ -1,0 +1,41 @@
+{
+  "job_default": "os-staging-image",
+  "builds": [
+    {
+      "job": "os-staging-image",
+      "number": 1211,
+      "result": "SUCCESS",
+      "branch": "master",
+      "duration_s": 501,
+      "started_at": "2026-11-25T03:00:00Z",
+      "log_excerpt": "Started by timer (nightly-warming)\nRunning on builder-07 in /tmp/jenkins-ws-77e1/os-staging-image\n[checkout] Cloning branch master (sha 8f3c1de) … done in 12s\n[stage: warming-构建] 产出 os-staging-image 24.04.1201\n[stage: warming-构建] 推送 registry.mock:5000/os-staging-image:24.04.1201 完成\n汇总：9 个 stage 全部通过，告警 0 条\nFinished: SUCCESS",
+      "context": {
+        "mock_scenario": "warming"
+      }
+    },
+    {
+      "job": "os-staging-install",
+      "number": 1212,
+      "result": "SUCCESS",
+      "branch": "master",
+      "duration_s": 194,
+      "started_at": "2026-11-25T03:08:00Z",
+      "log_excerpt": "Started by upstream project os-staging-image #1210\nRunning on builder-04 in /tmp/jenkins-ws-31bd/os-staging-install\n[stage: install-smoke] 安装 staging 包组 42 个，耗时 3m07s\n[stage: install-smoke] 校验包状态：无半安装项\n日志行数 2140，未发现异常簇\nFinished: SUCCESS",
+      "context": {
+        "mock_scenario": "warming"
+      }
+    },
+    {
+      "job": "os-staging-boot",
+      "number": 1213,
+      "result": "SUCCESS",
+      "branch": "master",
+      "duration_s": 404,
+      "started_at": "2026-11-25T03:15:00Z",
+      "log_excerpt": "Started by timer (warming-boot)\nRunning on sut-boot-02 (locked)\n[stage: boot-check] UEFI 引导成功，systemd 默认 target 就绪\n[stage: boot-check] journald 抓取 812 行，无告警\n耗时 6m44s\nFinished: SUCCESS",
+      "context": {
+        "mock_scenario": "warming"
+      }
+    }
+  ]
+}

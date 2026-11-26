@@ -1,0 +1,4 @@
+recursive-include src/iqe_agents/common/data *
+recursive-include src/iqe_agents/triage/skills *.md
+recursive-include src/iqe_agents/migrations *.sql
+include src/iqe_agents/py.typed

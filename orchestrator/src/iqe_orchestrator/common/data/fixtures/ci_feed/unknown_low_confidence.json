@@ -1,0 +1,19 @@
+{
+  "job_default": "os-staging-test",
+  "builds": [
+    {
+      "job": "os-staging-test",
+      "number": 1361,
+      "result": "FAILURE",
+      "branch": "master",
+      "duration_s": 941,
+      "started_at": "2026-11-25T12:00:00Z",
+      "log_excerpt": "Started by upstream project os-staging-test #1361\nRunning on sut-gfx1151-12 (locked) in /tmp/ws-81bb/os-staging-test\n[checkout] Cloning branch master (sha 5b91a03)\n[stage: kmod-load] 加载 amdgpu-dkms 24.04.1 模块，耗时 39s\n[stage: kernel-mode-suite] 运行 gfx1151 kernel-mode 用例集（11 例）\namdgpu 0000:61:00.0: GPU page fault at 0x7f00000551, vmid 1\namdgpu: failed to process VM fault on ring gfx_0 (retry 1/3)\n[  402.0741203] Kernel panic - not syncing: Fatal exception in interrupt\n[  402.0741240] Call Trace: amdgpu_irq_handler+0x1a4/0x4c0 [amdgpu]\ndmesg 尾部：Oops 发生在 resume 之后 4s 之后的日志被截断，失败阶段无法确认\n构建机被看护程序重启，11 个用例未跑完\nFinished: FAILURE",
+      "context": {
+        "mock_scenario": "unknown_low_confidence",
+        "failed_stage": "kernel-mode-suite",
+        "locked_resource": "sut-gfx1151-71"
+      }
+    }
+  ]
+}

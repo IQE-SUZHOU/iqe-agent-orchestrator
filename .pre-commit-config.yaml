@@ -1,0 +1,56 @@
+# 提交前门禁：lint → 格式化 → 导入排序 → 类型 → 离线自检。
+# 一次性安装：  pre-commit install      （钩子环境由 pre-commit 自己建，需要 pip 能装包）
+# 临时全量跑：  pre-commit run --all-files
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml            # deploy/k8s/*.yaml 与 workflows/*.yaml
+      - id: check-json
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: debug-statements
+      - id: check-merge-conflict
+
+  - repo: local
+    hooks:
+      # 明文口令不许进仓库（deploy/secrets.env 已被 .gitignore，这道钩子防手滑写进代码/清单/文档）
+      - id: no-plaintext-credentials
+        name: no-plaintext-credentials
+        language: script
+        entry: scripts/check_secrets.sh
+        files: '\.(py|sh|ya?ml|md|toml|txt)$'
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.6
+    hooks:
+      - id: ruff
+        args: [--fix]
+
+  - repo: https://github.com/pycqa/isort
+    rev: 6.0.1
+    hooks:
+      - id: isort
+
+  - repo: https://github.com/psf/black
+    rev: 25.12.0
+    hooks:
+      - id: black
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.18.1
+    hooks:
+      - id: mypy
+        args: [--config-file=pyproject.toml]
+        additional_dependencies: [types-PyYAML]
+        files: ^(orchestrator|agents)/src/
+
+  - repo: local
+    hooks:
+      - id: offline-selfcheck
+        name: offline-selfcheck（六个剧本 + 计划契约，不需要 broker/DB）
+        entry: python -m iqe_agents.tools.selfcheck
+        language: python
+        additional_dependencies: ["jsonschema==4.26.0", "PyYAML==6.0.4", "python-ulid==4.2.0", "asyncpg==0.32.0", "aio-pika==10.2.3"]
+        files: ^(orchestrator|agents)/src/.*
+        pass_filenames: false

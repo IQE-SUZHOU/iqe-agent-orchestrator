@@ -1,0 +1,9 @@
+{
+  "unknown_low_confidence": {
+    "force_rca": "unknown",
+    "confidence": 0.3,
+    "notes": [
+      "日志被截断，无法定位失败阶段"
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "job_default": "builder-nightly",
+  "builds": [
+    {
+      "job": "builder-nightly",
+      "number": 1271,
+      "result": "ABORTED",
+      "branch": "master",
+      "duration_s": 12,
+      "started_at": "2026-11-25T09:00:00Z",
+      "log_excerpt": "Started by timer (nightly-cleanup)\nRunning on builder-14 (executor 3)\n[executor] jenkins executor died：executor 3 退出码 137\n[executor] agent disconnected：节点 builder-14 与控制器失联 45s\n[workspace] 无法写入 workspace：no space left on device (device /dev/sda1 已用 100%)\n看护程序记录：本次任务未进入任何构建阶段\nFinished: ABORTED",
+      "context": {
+        "mock_scenario": "aborted_infra",
+        "node": "builder-14"
+      }
+    }
+  ]
+}

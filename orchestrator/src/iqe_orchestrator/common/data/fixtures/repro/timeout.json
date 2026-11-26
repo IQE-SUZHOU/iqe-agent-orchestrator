@@ -1,0 +1,29 @@
+{
+  "sleep_s": 45,
+  "note": "剧本故意慢，用于验证编排层超时→retryable→blocked 与 DLQ",
+  "reproducible": "flaky",
+  "attempts": 3,
+  "matrix": [
+    {
+      "os": "sut-target-os 24.04",
+      "config": "default",
+      "outcome": "fail"
+    },
+    {
+      "os": "sut-target-os 24.04",
+      "config": "default",
+      "outcome": "pass"
+    },
+    {
+      "os": "sut-target-os 24.04",
+      "config": "default",
+      "outcome": "fail"
+    }
+  ],
+  "steps_summary": [
+    "排队等待机位 1800s",
+    "两次进入 kernel-mode 阶段",
+    "第三次超时前未完成"
+  ],
+  "log_excerpt": "repro attempt 1: 复现错误簇\nrepro attempt 2: 通过\nrepro attempt 3: 在 deadline 前未完成"
+}

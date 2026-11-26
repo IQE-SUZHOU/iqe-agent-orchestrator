@@ -1,0 +1,54 @@
+{
+  "job_default": "os-staging-image",
+  "builds": [
+    {
+      "job": "os-staging-image",
+      "number": 1241,
+      "result": "SUCCESS",
+      "branch": "master",
+      "duration_s": 505,
+      "started_at": "2026-11-25T06:00:00Z",
+      "log_excerpt": "Started by timer (nightly-warming)\nRunning on builder-07 in /tmp/jenkins-ws-77e1/os-staging-image\n[checkout] Cloning branch master (sha 8f3c1de) … done in 12s\n[stage: warming-构建] 产出 os-staging-image 24.04.1201\n[stage: warming-构建] 推送 registry.mock:5000/os-staging-image:24.04.1201 完成\n汇总：9 个 stage 全部通过，告警 0 条\nFinished: SUCCESS",
+      "context": {
+        "mock_scenario": "mixed"
+      }
+    },
+    {
+      "job": "os-staging-boot",
+      "number": 1242,
+      "result": "SUCCESS",
+      "branch": "master",
+      "duration_s": 388,
+      "started_at": "2026-11-25T06:08:00Z",
+      "log_excerpt": "Started by timer (warming-boot)\nRunning on sut-boot-02 (locked)\n[stage: boot-check] UEFI 引导成功，systemd 默认 target 就绪\n[stage: boot-check] journald 抓取 812 行，无告警\n耗时 6m44s\nFinished: SUCCESS",
+      "context": {
+        "mock_scenario": "mixed"
+      }
+    },
+    {
+      "job": "os-staging-image",
+      "number": 1243,
+      "result": "FAILURE",
+      "branch": "master",
+      "duration_s": 240,
+      "started_at": "2026-11-25T06:20:00Z",
+      "log_excerpt": "Started by upstream project ci-nightly #2419\nRunning on builder-07 in /tmp/ws-77e1/os-staging-image\n[stage: compile-userspace-lib] make -C userspace all\ngcc -O2 -fno-strict-aliasing -Iinclude -c src/copy_engine.c -o obj/copy_engine.o\nsrc/copy_engine.c:212:7: error: undefined reference to 'gfx_copy_engine_flush'\nsrc/copy_engine.c:219:11: error: 'copy_ctx' undeclared (first use in this function)\ncc1: 编译失败，共 2 个错误\nmake: *** [Makefile:24: obj/copy_engine.o] 错误 1\n构建阶段 compile-userspace-lib 中止：工具链新增报错，与历史签名不同\nFinished: FAILURE",
+      "context": {
+        "mock_scenario": "mixed",
+        "failed_stage": "compile-userspace-lib"
+      }
+    },
+    {
+      "job": "apt-mirror-sync",
+      "number": 1244,
+      "result": "FAILURE",
+      "branch": "master",
+      "duration_s": 59,
+      "started_at": "2026-11-25T06:24:00Z",
+      "log_excerpt": "Started by timer (index-refresh)\nRunning on builder-09 in /tmp/ws-2e70/apt-mirror-sync\n[stage: fetch-repo] E:Failed to fetch http://repo.internal/ubuntu/dists/stable/Release  404 Not Found [IP: 10.20.30.7 80]\n[stage: fetch-repo] Packages index 拉取失败：Packages index for stable is corrupt\n构建机出口链路抖动：network unreachable（proxy-01 会话被重置）\n结论：与本次代码变更无关，索引同步未完成（近 14 天已出现 11 次）\nFinished: FAILURE",
+      "context": {
+        "mock_scenario": "mixed"
+      }
+    }
+  ]
+}

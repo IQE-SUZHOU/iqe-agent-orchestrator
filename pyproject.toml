@@ -1,0 +1,93 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iqe-agent-orchestrator"
+version = "0.2.0"
+description = "IQE CI 分诊系统工作区：orchestrator（编排层）+ agents（6 个 Mock Agent）两个自包含子项目"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary — internal demo of IQE-SUZHOU" }
+authors = [{ name = "IQE-SUZHOU" }]
+# 依赖由两个子项目各自声明；根项目只负责开发工具与统一配置。
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.2.0",
+    "ruff>=0.17",
+    "black>=25",
+    "isort>=6",
+    "mypy>=1.18",
+    "pre-commit>=4",
+    "types-PyYAML",
+]
+
+[project.urls]
+Repository = "https://github.com/IQE-SUZHOU/iqe-agent-orchestrator"
+
+[tool.setuptools]
+# 工作区根不打包：真正的产物是 orchestrator/ 与 agents/ 两个子项目。
+packages = []
+
+# ───────────────────────── pytest ─────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests", "orchestrator/tests", "agents/tests"]
+addopts = "-q -p no:cacheprovider --strict-markers"
+pythonpath = ["orchestrator/src", "agents/src"]
+markers = [
+    "unit: 离线单元测试（不需要 broker / Postgres / Agent 进程）",
+    "contract: 两个子项目之间的契约一致性测试（共享层副本、schema）",
+    "integration: 端到端集成测试（需要编排层 + 6 个 Agent 在跑）",
+]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+# ───────────────────────── ruff ─────────────────────────
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["orchestrator/src", "agents/src", "tests"]
+extend-exclude = [".plans", ".run", "docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "C4", "SIM", "UP", "RET", "PTH", "RUF"]
+ignore = [
+    "E501",
+    "RUF001", "RUF002", "RUF003",
+    "SIM105",
+    "RET504",
+    "PTH123",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["B011", "PTH", "SIM105"]
+
+# ───────────────────────── black / isort ─────────────────────────
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+src_paths = ["orchestrator/src", "agents/src", "tests"]
+
+# ───────────────────────── mypy ─────────────────────────
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "orchestrator/src:agents/src"
+files = ["orchestrator/src", "agents/src"]
+ignore_missing_imports = true
+follow_untyped_imports = true
+check_untyped_defs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+warn_redundant_casts = true
+warn_unused_configs = true
+no_implicit_optional = true
+strict_equality = false
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true

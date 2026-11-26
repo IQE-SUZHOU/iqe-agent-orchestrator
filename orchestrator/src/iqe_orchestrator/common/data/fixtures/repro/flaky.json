@@ -1,0 +1,29 @@
+{
+  "reproducible": "flaky",
+  "attempts": 3,
+  "matrix": [
+    {
+      "os": "sut-target-os 24.04",
+      "config": "default",
+      "outcome": "fail"
+    },
+    {
+      "os": "sut-target-os 24.04",
+      "config": "low-priv",
+      "outcome": "pass"
+    },
+    {
+      "os": "sut-target-os 24.04",
+      "config": "default",
+      "outcome": "fail"
+    }
+  ],
+  "note": "不稳定复现",
+  "steps_summary": [
+    "锁定 sut-gfx1151-02",
+    "三次同参重建",
+    "对比 config 差异",
+    "登记不稳定度"
+  ],
+  "log_excerpt": "repro attempt 1: AssertionError 期望 1 实际 0\nrepro attempt 2: 通过（low-priv 配置）\nrepro attempt 3: 复现原断言失败"
+}

@@ -38,7 +38,7 @@ spec:
       containers:
         - name: orchestrator
           image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
-          command: ["python", "-m", "orchestrator.main"]
+          command: ["ci-orchestrator"]
           envFrom:
             - configMapRef:
                 name: ci-triage-config

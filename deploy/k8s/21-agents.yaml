@@ -1,5 +1,5 @@
 # 6 个 Agent：各自独立 Deployment / 独立账号 / 独立队列，互不直连（星型拓扑，只经编排层）
-# 同一个镜像不同 command —— 已在 design/05 记录为可接受的演示偏离
+# 同一个镜像不同 command —— 已在 docs/architecture/05 记录为可接受的演示偏离
 
 ---
 apiVersion: apps/v1
@@ -44,7 +44,7 @@ spec:
       containers:
         - name: agent-monitor
           image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
-          command: ["python", "-m", "agents.monitor.main"]
+          command: ["ci-agent-monitor"]
           envFrom:
             - configMapRef:
                 name: ci-triage-config
@@ -135,7 +135,7 @@ spec:
       containers:
         - name: agent-triage
           image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
-          command: ["python", "-m", "agents.triage.main"]
+          command: ["ci-agent-triage"]
           envFrom:
             - configMapRef:
                 name: ci-triage-config
@@ -224,7 +224,7 @@ spec:
       containers:
         - name: agent-reproduction
           image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
-          command: ["python", "-m", "agents.reproduction.main"]
+          command: ["ci-agent-reproduction"]
           envFrom:
             - configMapRef:
                 name: ci-triage-config
@@ -315,7 +315,7 @@ spec:
       containers:
         - name: agent-ticket
           image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
-          command: ["python", "-m", "agents.ticket.main"]
+          command: ["ci-agent-ticket"]
           envFrom:
             - configMapRef:
                 name: ci-triage-config
@@ -404,7 +404,7 @@ spec:
       containers:
         - name: agent-review
           image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
-          command: ["python", "-m", "agents.review.main"]
+          command: ["ci-agent-review"]
           envFrom:
             - configMapRef:
                 name: ci-triage-config
@@ -493,7 +493,7 @@ spec:
       containers:
         - name: agent-reporting
           image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
-          command: ["python", "-m", "agents.reporting.main"]
+          command: ["ci-agent-reporting"]
           envFrom:
             - configMapRef:
                 name: ci-triage-config

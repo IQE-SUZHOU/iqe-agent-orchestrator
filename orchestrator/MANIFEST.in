@@ -1,0 +1,4 @@
+recursive-include src/iqe_orchestrator/common/data *
+recursive-include src/iqe_orchestrator/ui *.html
+recursive-include src/iqe_orchestrator/migrations *.sql
+include src/iqe_orchestrator/py.typed

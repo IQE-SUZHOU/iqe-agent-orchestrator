@@ -1,0 +1,22 @@
+{
+  "families": [
+    {
+      "family": "apt-repo:offline",
+      "noise_score": 0.92,
+      "note": "构建机外网代理抖动导致 apt 索引拉取失败，与代码无关",
+      "owner_team": "infra"
+    },
+    {
+      "family": "network:offline",
+      "noise_score": 0.9,
+      "note": "同上",
+      "owner_team": "infra"
+    },
+    {
+      "family": "apt-repo:repo-404",
+      "noise_score": 0.55,
+      "note": "上游仓库偶发 404，需人工确认",
+      "owner_team": "infra"
+    }
+  ]
+}
