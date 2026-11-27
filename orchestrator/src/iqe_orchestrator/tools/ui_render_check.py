@@ -62,11 +62,11 @@ def fake_dlq(with_rows: bool) -> dict:
             "items": [
                 {
                     "id": 1,
-                    "stage": "review",
+                    "stage": "reviewer",
                     "idempotency_key": "case:x1:1",
                     "case_id": "case",
                     "reason": "contract_violation: mode",
-                    "original_routing_key": "ci.cmd.review.run",
+                    "original_routing_key": "ci.cmd.reviewer.gate1",
                     "redelivered": False,
                     "body": '{"mode":"bogus"}',
                     "created_at": _dt(),

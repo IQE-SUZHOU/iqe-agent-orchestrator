@@ -10,7 +10,7 @@ rationale: "故意非法：steps 里出现不存在的 stage（校验器必须�
 model: "mock-planner"
 confidence: 0.40
 steps:
-  - {id: x0, stage: reboot_server, mode: run}
-  - {id: t1, stage: triage, mode: full}
+  - {id: x0, stage: reboot_server, mode: classify}
+  - {id: t1, stage: triage, mode: classify}
   - {id: p1, stage: reporting, mode: case}
 validator: "plan-validator/v1"

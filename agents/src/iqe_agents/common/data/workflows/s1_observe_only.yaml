@@ -1,0 +1,14 @@
+key: s1_observe_only
+title: 无新失败：只做分类观测（Monitor→Triage→Reporting）
+enabled: true
+priority: 100
+version: 2
+match:
+  signal: none
+steps:
+  - id: t1
+    stage: triage
+    mode: classify
+  - id: p1
+    stage: reporting
+    mode: case

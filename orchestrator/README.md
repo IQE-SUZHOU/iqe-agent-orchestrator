@@ -1,7 +1,10 @@
-# iqe-orchestrator —— CI 分诊编排层
+# iqe-orchestrator —— CI 失败分诊编排层
 
 LangGraph 状态机 + 计划层（workflow 优先 / LLM 兜底）+ Dispatch-Await 网关 + HTTP API 与 Web UI。
 **编排层是唯一的下游决定者**：Agent 之间不互相调用，也不直连编排层，一切跨单元通信只走 RabbitMQ。
+
+它按总体流程图的 **12 个阶段 / 两条分支 / 三道闸门**推进：分支与回炉都写在计划里（`next` / `jump`），
+执行期零模型调用；step 输出按 `step_id` 存放，所以同一张计划里的三道闸门不会互相覆盖。
 
 本目录是一个**自包含 Python 项目**：`pyproject.toml`、`src/`、`tests/`、`MANIFEST.in` 齐全，
 可以单独 `pip install`、单独打镜像；与仓库里的 [`agents/`](../agents/README.md) 无代码依赖。
@@ -12,7 +15,7 @@ LangGraph 状态机 + 计划层（workflow 优先 / LLM 兜底）+ Dispatch-Awai
 pip install -e ./orchestrator          # 只装编排层
 # 或在仓库根：make install-dev（两个子项目一起装 + 开发工具）
 
-ci-broker-setup --mgmt http://127.0.0.1:15672   # 声明 exchange/queue/binding（幂等）
+ci-broker-setup --mgmt http://127.0.0.1:15672   # 声明 exchange/queue/binding（幂等，8 个 Agent 队列）
 ci-db-migrate                                   # 建库 + 建表 + 连通性检查（幂等）
 ci-orchestrator                                 # uvicorn :8080，后台跑引擎/网关/调度器
 ```
@@ -31,16 +34,16 @@ ci-orchestrator                                 # uvicorn :8080，后台跑引�
 |---|---|
 | `main.py` | 进程入口：uvicorn 承载 API/UI，后台起引擎、网关、调度器 |
 | `app.py` | FastAPI 应用：`/healthz` `/readyz` `/metrics`、`/api/*`、Web UI 页面 |
-| `graph.py` | 编排图：`resolve_plan → validate_plan → step → advance → finalize`；图结构固定，路径由 plan 决定 |
-| `plan.py` | 计划层：Workflow Registry、`LLMPlanner`、`validate_plan`（V0–V8）、`PlanStore.seal/read`、`builtin_plan` |
+| `graph.py` | 编排图：`resolve_plan → step → advance → finalize`；按 step_id 存输出，按 `on.<verb>` 选 `next`/`jump`/`end` |
+| `plan.py` | 计划层：Workflow Registry、`LLMPlanner`、`validate_plan`（V0–V9）、`PlanStore.seal/read`、`builtin_plan` |
 | `dispatch.py` | Dispatch–Await：编排层唯一的总线写者，按 `idempotency_key` 配对 in-process Future |
 | `scan.py` | 扫描执行：把 Monitor 观测转成 Case 并起各自的 plan 图（抑制规则在观察层生效） |
 | `scheduler.py` | 定时触发：Monitor 扫描周期 + 每日日报（只发命令，不替 Agent 决策） |
 | `reporting.py` | 日报触发命令（走与 Agent 相同的命令通道） |
 | `migrate.py` | 建库 + `init_schema` + 连通性检查 |
-| `common/` | 共享层（消息总线、DB、信封/幂等、配置、路径、健康探针、日志、Mock），见下 |
+| `common/` | 共享层（消息总线、DB、信封/幂等、契约、知识库、配置、路径、健康探针、日志、Mock） |
 | `common/data/` | 权威契约与资源：`schemas/`（envelope / stage-contracts / plan）、`workflows/`、`fixtures/` |
-| `migrations/001_init.sql` | 14 张表的 DDL（Case / stage_runs / evidence / plans / workflows / 工单 / 日报 …） |
+| `migrations/` | DDL：cases / stage_runs / evidence / reviews(gate) / remediations / verifications / regressions / tickets / kb_entries / plans / workflows / daily_reports … |
 | `ui/templates/` | Jinja2 模板：Case 列表、Case 详情、计划、健康 |
 | `tools/` | 运维脚本：`graph_smoke` / `ui_render_check` / `setup_broker` |
 
@@ -50,12 +53,22 @@ ci-orchestrator                                 # uvicorn :8080，后台跑引�
 触发信息 ─┬─ 命中 common/data/workflows/*.yaml → 实例化 plan.yaml（source=workflow，零 LLM）
           └─ 未命中                            → LLM 写同构 plan.yaml（source=llm）
                               │
-        yaml.safe_load → JSON Schema → V1–V8 校验（白名单/顺序/跳转/步数/防注入）
+        yaml.safe_load → JSON Schema → V0–V9 校验（白名单/顺序/跳转/分支闭合/防注入）
                               │
-        非法或超时 → 带错误重试 1 次 → degraded 内置安全网（s1_lite / s2_full）
+        非法或超时 → 带错误重试 1 次 → degraded 内置安全网（s1_observe_only / s2_full / s3_test_no_repro）
 ```
 
-人工与模型**同一 schema、同一校验器、同一执行器**；执行期零模型调用，重放读已落盘的 YAML。
+三份内置 workflow 对应三种形状：
+
+| key | 命中条件 | 形状 |
+|---|---|---|
+| `s1_observe_only` | `signal=none` | triage → reporting（只观测，不建 Case 链路） |
+| `s2_full` | `signal=error`（除 `llm-plan-demo`） | 闸门 1 双分支：internal（4a→5a→闸门 2）/ external（4b→5b→6c→7b→闸门 3）→ 9 |
+| `s3_test_no_repro` | 签名族 `test:*` | 测试类失败不占重跑机位：external 直接 5b → 6c → 7b → 闸门 3 |
+
+校验器（V0 schema、V1 步数、V2/V3 stage·mode 白名单、V4 主线形状、V5 路由方向、V6 回炉上限、
+V7 step id、V8 防注入、V9 分支闭合）在人工与 LLM 计划上同等生效；
+LLM 连续两次不通过就降级到内置安全网，并在 `plans` 表标 `degraded=true`。
 
 ## 主要环境变量
 
@@ -67,8 +80,9 @@ ci-orchestrator                                 # uvicorn :8080，后台跑引�
 | `SCHEMAS_DIR` `FIXTURES_DIR` `WORKFLOWS_DIR` | 包内 `common/data/*` | 资源目录覆盖 |
 | `PLANS_DIR` | `$PWD/.plans` | 封存计划落盘目录 |
 | `PLAN_MODE` | `auto` | `auto` \| `strict`（不调 LLM）\| `llm_only` |
-| `MOCK_LLM_ENABLED` / `PLAN_MOCK_SCENARIO` | `true` / `warming_ok` | 离线演练计划生成 |
-| `STAGE_TIMEOUT_S` `STAGE_MAX_ATTEMPTS` `MAX_REVIEW_LOOPS` | `30` / `2` / `2` | 阶段超时、重试、复核回炉上限 |
+| `MOCK_LLM_ENABLED` / `PLAN_MOCK_SCENARIO` | `true` / `internal_ok` | 离线演练计划生成（`internal_ok` / `external_ok` / `invalid_*`） |
+| `STAGE_TIMEOUT_S` `STAGE_MAX_ATTEMPTS` `MAX_REVIEW_LOOPS` | `30` / `2` / `2` | 阶段超时、重试、闸门回炉上限 |
+| `MAX_PLAN_STEPS` `RECURSION_LIMIT` | `24` / `40` | 单张计划的步数上限与图递归上限 |
 | `SCAN_STARTUP_DELAY_S` `MONITOR_SCAN_INTERVAL_S` | `30` / `3600` | 首次扫描宽限、扫描周期 |
 | `SCHEDULER_ENABLED` `REPORT_AT` `REPORT_TZ` | `true` / `18:00` / `UTC` | 定时触发 |
 
@@ -77,8 +91,8 @@ ci-orchestrator                                 # uvicorn :8080，后台跑引�
 ## 测试
 
 ```bash
-cd orchestrator && pytest -q                 # 计划层单测（registry 匹配、V4/V8、YAML 往返）
-cd ..        && make test                    # 仓库根：unit + contract（含共享层一致性）
+cd orchestrator && pytest -q                 # 计划层单测：注册表匹配、V0–V9、LLM 兜底、YAML 往返
+cd ..          && make test                  # 仓库根：unit + contract（含共享层一致性）
 PG_DSN=... make smoke ui-check               # 状态机 / UI 渲染（只要 Postgres 存 checkpoint）
 ```
 

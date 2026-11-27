@@ -1,0 +1,17 @@
+{
+  "quality_weights": {
+    "evidence": 0.4,
+    "consistency": 0.3,
+    "path": 0.3
+  },
+  "gate2": {
+    "verdict": "approve",
+    "reason_code": "ok",
+    "notes": "修复与验证证据一致，风险低"
+  },
+  "gate3": {
+    "verdict": "approve",
+    "reason_code": "ok",
+    "notes": "根因、复现、补丁、责任人齐备"
+  }
+}

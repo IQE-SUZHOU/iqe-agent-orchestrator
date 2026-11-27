@@ -1,10 +1,12 @@
-"""Reporting 剧本：mode=case 出单案例结案报告；mode=daily 出每日台账日报（Mock）。
+"""Reporting 剧本（阶段 9）：结案报告 / 日报 + 知识库回写清单。
 
 数据来源全部是 Postgres（cases / stage_runs / evidence / scans / daily_reports），
 剧本本身不做推理：
-- case：get_case + trace + get_stage_output(各 stage) + evidence(case_id) → Markdown 结案报告；
+- case：get_case + stage_outputs + evidence → Markdown 结案报告 + kb_writes；
 - daily：daily_metrics(day) + list_cases(limit) + fixtures/reporting/template.md → 日报正文。
-输出契约：{case_id, day, report_md, metrics}（正文走 report_md，指标走 metrics）。
+
+知识库回写遵循写权分工：Agent 只把条目放进 result 的 ``kb_writes``，
+由编排层落到 kb_entries 表（Agent 不直写知识库）。
 """
 
 from __future__ import annotations
@@ -18,23 +20,38 @@ from iqe_agents.runtime import Blocked, Ctx
 
 log = logging.getLogger("agent.reporting.playbook")
 
-STAGE_ORDER = ("monitor", "triage", "reproduction", "ticket", "review", "reporting")
+STAGE_ORDER = (
+    "triage",
+    "reviewer",
+    "remediation",
+    "reproduction",
+    "regression",
+    "ticketing",
+    "reporting",
+)
 STAGE_LABEL = {
-    "monitor": "Monitor 扫描",
-    "triage": "Triage 分诊",
-    "reproduction": "Reproduction 受控重跑",
-    "ticket": "Ticket 成单",
-    "review": "Review 复核",
-    "reporting": "Reporting 报告",
+    "monitor": "1 Monitor 失败发现",
+    "triage": "2 Triage 分诊",
+    "reviewer": "3/6a/8b Reviewer 闸门",
+    "remediation": "4a Remediation 修复",
+    "reproduction": "4b/5a 复现与验证",
+    "regression": "5b/6c 回归判定与定位",
+    "ticketing": "7b Ticketing 建单",
+    "reporting": "9 Reporting 报告",
 }
 OPEN_STATUSES = (
     "created",
     "triaged",
-    "repro_running",
+    "routed_internal",
+    "routed_external",
+    "remediated",
+    "fix_verified",
+    "reproduced",
+    "regression_checked",
+    "bisected",
     "ticketed",
-    "review_running",
-    "review_needs_info",
 )
+GATE_LABEL = {"gate1": "闸门 1（分流）", "gate2": "闸门 2（修复）", "gate3": "闸门 3（工单）"}
 
 
 def _today() -> str:
@@ -76,6 +93,82 @@ def _metrics_jsonable(metrics: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _by_mode(outputs: dict[str, list[dict]], stage: str) -> dict[str, dict]:
+    """stage → {mode: output}（同一 stage 多次执行时按 mode 取最新一次）。"""
+    out: dict[str, dict] = {}
+    for row in outputs.get(stage) or []:
+        out[str(row.get("mode") or "")] = row.get("output") or {}
+    return out
+
+
+def _kb_writes(case: dict, outputs: dict[str, list[dict]], reports: dict[str, dict]) -> list[dict]:
+    """把本 Case 的可复用结论整理成知识条目（由编排层落库）。"""
+    triage = outputs.get("triage") or []
+    triage_out = (triage[-1].get("output") if triage else {}) or {}
+    component = str(triage_out.get("component") or "unknown")
+    signature = triage_out.get("signature") or case.get("signature")
+    case_id = case.get("case_id")
+    entries: list[dict] = []
+
+    if triage_out.get("rca") and triage_out.get("rca") != "unknown":
+        entries.append(
+            {
+                "kind": "failure",
+                "component": component,
+                "signature": signature,
+                "summary": (
+                    f"rca={triage_out.get('rca')}，路径={triage_out.get('path')}，"
+                    f"置信度={triage_out.get('confidence')}；"
+                    f"{(triage_out.get('triage_notes') or [''])[0][:160]}"
+                ),
+                "case_id": case_id,
+            }
+        )
+
+    fix = reports.get("fix") or {}
+    if fix.get("fixed"):
+        entries.append(
+            {
+                "kind": "fix",
+                "component": component,
+                "signature": signature,
+                "summary": f"{fix.get('change_type')} → {fix.get('target')}：{fix.get('diff_summary')}",
+                "case_id": case_id,
+            }
+        )
+
+    patch = reports.get("guilty_patch") or {}
+    if patch.get("commit"):
+        entries.append(
+            {
+                "kind": "guilty_patch",
+                "component": component,
+                "signature": signature,
+                "summary": (
+                    f"{patch.get('commit')}（{patch.get('pr')} / {patch.get('author')}）："
+                    f"{patch.get('rationale') or ''}"
+                ),
+                "case_id": case_id,
+            }
+        )
+
+    verdicts = reports.get("verdicts") or {}
+    if verdicts.get("gate3") == "approve" or verdicts.get("gate2") == "approve":
+        entries.append(
+            {
+                "kind": "best_practice",
+                "component": component,
+                "signature": signature,
+                "summary": (
+                    f"该路径（{reports.get('path') or 'unknown'}）通过闸门复核："
+                    f"gate2={verdicts.get('gate2', '—')}，gate3={verdicts.get('gate3', '—')}"
+                ),
+                "case_id": case_id,
+            }
+        )
+    return entries[:10]
+
+
 # --------------------------------------------------------------------------- mode=case
 async def _case_report(ctx: Ctx, case_id: str) -> dict[str, Any]:
     case = await ctx.db.get_case(case_id)
@@ -83,16 +176,26 @@ async def _case_report(ctx: Ctx, case_id: str) -> dict[str, Any]:
         raise Blocked("schema_invalid", f"cases 表里没有 {case_id}，无法出结案报告")
     trace = list(await ctx.db.trace(case_id) or [])
     evidence = list(await ctx.db.evidence(case_id) or [])
-    outputs = {
-        stage: await ctx.db.get_stage_output(case_id, stage)
-        for stage in ("triage", "reproduction", "ticket", "review")
-    }
-    triage = outputs.get("triage") or {}
-    repro = outputs.get("reproduction") or {}
-    ticket = outputs.get("ticket") or {}
-    review = outputs.get("review") or {}
+    outputs = await ctx.db.stage_outputs(case_id)
 
-    stage_rows = [r for r in trace if r.get("stage") in STAGE_ORDER]
+    triage_out = (outputs.get("triage") or [{}])[-1].get("output") or {}
+    gates = _by_mode(outputs, "reviewer")
+    repro = _by_mode(outputs, "reproduction")
+    reg = _by_mode(outputs, "regression")
+    fix = (outputs.get("remediation") or [{}])[-1].get("output") or {}
+    ticket = (outputs.get("ticketing") or [{}])[-1].get("output") or {}
+
+    verdicts = {gate: str((gates.get(gate) or {}).get("verdict")) for gate in GATE_LABEL}
+    decisions = {gate: (gates.get(gate) or {}).get("decision") for gate in GATE_LABEL}
+    path = decisions.get("gate1") if decisions.get("gate1") in ("internal", "external") else None
+    path = path or triage_out.get("path") or "unknown"
+    verify = repro.get("verify") or {}
+    evidence_mode = repro.get("evidence") or {}
+    check_out = reg.get("check") or {}
+    bisect_out = reg.get("bisect") or {}
+    patch = bisect_out.get("guilty_patch") or {}
+
+    stage_rows = [r for r in trace if r.get("stage") in STAGE_LABEL]
     tat_ms = sum(_ms(r) for r in stage_rows)
     stage_status = {r.get("stage"): r.get("status") for r in stage_rows}
 
@@ -101,15 +204,21 @@ async def _case_report(ctx: Ctx, case_id: str) -> dict[str, Any]:
         "## 结论摘要",
         f"- 状态：**{case.get('status') or 'unknown'}**（signal={case.get('signal')}，"
         f"job={case.get('job')}#{case.get('build') or '-'}）",
-        f"- 签名：`{case.get('signature') or triage.get('signature') or '无'}`",
-        f"- 根因：**{triage.get('rca') or '未分诊'}**（置信度 {triage.get('confidence', '—')}，"
-        f"组件 {triage.get('component') or '—'}，OS 阶段 {triage.get('os_stage') or '—'}）",
-        f"- 复现结论：{repro.get('reproducible') or '本计划未做复现'}"
-        + (f"（{repro.get('attempts')} 次）" if repro.get("attempts") else ""),
+        f"- 签名：`{case.get('signature') or triage_out.get('signature') or '无'}`",
+        f"- 根因：**{triage_out.get('rca') or '未分诊'}**（置信度 {triage_out.get('confidence', '—')}，"
+        f"组件 {triage_out.get('component') or '—'}，OS 阶段 {triage_out.get('os_stage') or '—'}）",
+        f"- 分流：**{path}**（闸门 1 {verdicts.get('gate1') or '未执行'}，"
+        f"分诊预判 {triage_out.get('path') or '—'}）",
+        f"- 修复：{('已提交改动 ' + str(fix.get('target'))) if fix.get('fixed') else '未走修复路径或修复未成形'}"
+        f"（闸门 2 {verdicts.get('gate2') or '未执行'}）",
+        f"- 复现取证：{evidence_mode.get('reproducible') or '本计划未做取证'}"
+        f"（{evidence_mode.get('attempts') or 0} 次）；验证：fix_verified={verify.get('fix_verified')}",
+        f"- 回归：is_regression={check_out.get('is_regression')}"
+        f"，guilty patch={patch.get('commit') or '未定位'}",
         f"- 工单：{ticket.get('ticket_status') or '未成单'} "
         f"{ticket.get('external_key') or ticket.get('duplicate_of') or ''}"
-        f"（{ticket.get('ticket_priority') or '—'} / {ticket.get('assignee_team') or '—'}）",
-        f"- 复核：**{review.get('verdict') or '未复核'}**（{review.get('reason_code') or '—'}）",
+        f"（{ticket.get('priority') or '—'} / {ticket.get('assignee_team') or '—'}，"
+        f"闸门 3 {verdicts.get('gate3') or '未执行'}）",
         f"- 计划来源：{case.get('plan_source') or '—'} / {case.get('workflow_key') or '—'}",
         "",
     ]
@@ -120,8 +229,9 @@ async def _case_report(ctx: Ctx, case_id: str) -> dict[str, Any]:
         if not rows:
             continue
         attempt = max(int(r.get("attempt") or 1) for r in rows)
+        modes = ", ".join(sorted({str(r.get("mode") or "—") for r in rows}))
         md.append(
-            f"| {STAGE_LABEL[stage]} | {stage_status.get(stage)} | "
+            f"| {STAGE_LABEL[stage]}（{modes}） | {stage_status.get(stage)} | "
             f"{sum(_ms(r) for r in rows)} ms | {attempt} |"
         )
     md.append(f"\n端到端用时（各阶段累计）：{tat_ms} ms\n")
@@ -138,19 +248,24 @@ async def _case_report(ctx: Ctx, case_id: str) -> dict[str, Any]:
         md.append("- 无证据记录")
     md.append("")
 
-    notes = list(triage.get("triage_notes") or [])[:4]
     unresolved: list[str] = [
-        f"Case 终态 {case.get('status')}：{'需要人工收尾' if case.get('status') in OPEN_STATUSES else '已闭环'}"
+        f"Case 终态 {case.get('status')}："
+        f"{'需要人工收尾' if case.get('status') in OPEN_STATUSES else '已闭环'}"
     ]
-    if not repro:
-        unresolved.append("本计划未包含受控重跑，复现结论待夜间批次补齐")
-    if review.get("verdict") == "needs_info":
-        unresolved.extend([f"复核要求补充：{r}" for r in (review.get("requested_info") or [])[:3]])
-    if review.get("verdict") == "reject":
-        unresolved.append(f"复核拒绝（{review.get('reason_code')}），未生成案例报告段")
-    if triage.get("duplicate_of"):
-        unresolved.append(f"疑似与 {triage['duplicate_of']} 重复，需人工确认是否合并")
+    if verify and verify.get("fix_verified") is False:
+        unresolved.append("验证未通过：修复无效，闸门 2 已打回或需人工介入")
+    if check_out.get("is_regression") and not patch.get("commit"):
+        unresolved.append("判定为回归但二分未收敛：需人工继续定位 guilty patch")
+    if ticket.get("ticket_status") == "linked_duplicate":
+        unresolved.append(f"已关联重复工单 {ticket.get('duplicate_of')}，未另建单")
+    for gate, verdict in verdicts.items():
+        if verdict in ("needs_info", "rework", "reject"):
+            requested = list((gates.get(gate) or {}).get("requested_info") or [])[:2]
+            unresolved.append(
+                f"{GATE_LABEL[gate]} 结论 {verdict}：{'；'.join(requested) or '见复核记录'}"
+            )
     md += ["## 未解决项"] + [f"- {u}" for u in unresolved]
+    notes = list(triage_out.get("triage_notes") or [])[:4]
     if notes:
         md += ["", "## 分诊要点"] + [f"- {n}" for n in notes]
 
@@ -164,19 +279,21 @@ async def _case_report(ctx: Ctx, case_id: str) -> dict[str, Any]:
             "signature": case.get("signature"),
             "plan_source": case.get("plan_source"),
             "workflow_key": case.get("workflow_key"),
-            "rca": triage.get("rca"),
-            "confidence": triage.get("confidence"),
-            "reproducible": repro.get("reproducible"),
-            "repro_attempts": repro.get("attempts"),
+            "path": path,
+            "rca": triage_out.get("rca"),
+            "confidence": triage_out.get("confidence"),
+            "verdicts": verdicts,
+            "fix_verified": verify.get("fix_verified"),
+            "reproducible": evidence_mode.get("reproducible"),
+            "is_regression": check_out.get("is_regression"),
+            "guilty_patch": patch.get("commit"),
             "ticket_status": ticket.get("ticket_status"),
             "ticket_key": ticket.get("external_key"),
-            "ticket_priority": ticket.get("ticket_priority"),
-            "verdict": review.get("verdict"),
-            "reason_code": review.get("reason_code"),
-            "quality_overall": (review.get("quality_scores") or {}).get("overall"),
+            "ticket_priority": ticket.get("priority"),
             "stages": [
                 {
                     "stage": r.get("stage"),
+                    "mode": r.get("mode"),
                     "status": r.get("status"),
                     "ms": _ms(r),
                     "attempt": int(r.get("attempt") or 1),
@@ -188,6 +305,18 @@ async def _case_report(ctx: Ctx, case_id: str) -> dict[str, Any]:
             "unresolved_count": len(unresolved),
         }
     )
+    reports = {
+        "path": path,
+        "verdicts": verdicts,
+        "fix": fix,
+        "guilty_patch": patch,
+    }
+    kb_writes = _kb_writes(case, outputs, reports)
+    if kb_writes:
+        md += ["", "## 知识库回写"] + [
+            f"- [{e['kind']}] {e['component']}：{e['summary'][:160]}" for e in kb_writes
+        ]
+
     report_md = "\n".join(md)[:20000]
     await ctx.evidence(
         "report_md",
@@ -200,6 +329,7 @@ async def _case_report(ctx: Ctx, case_id: str) -> dict[str, Any]:
         "day": _date_of(case.get("created_at")) or _today(),
         "report_md": report_md,
         "metrics": metrics,
+        "kb_writes": kb_writes,
     }
 
 
@@ -288,56 +418,35 @@ async def _daily_report(ctx: Ctx, day: str) -> dict[str, Any]:
                 report_md += f"\n## {('终态分布' if key == 'status_table' else '高频签名')}\n{mapping[key]}\n"
     else:
         report_md = (
-            f"# Staging-CI 日报 {day}\n\n## 概览\n{overview}\n\n## 根因分布\n{rca_table}\n\n"
-            f"## 终态分布\n{status_table}\n\n## 高频签名\n{sig_table}\n\n## 未解决项\n{open_md}\n"
+            f"# Staging-CI 日报 {day}\n\n## 总览\n{overview}\n\n## 根因分布\n{rca_table}\n\n"
+            f"## 未闭环案例\n{open_md}\n"
         )
 
-    metrics = _metrics_jsonable(
-        {
-            **metrics,
-            "day": day,
-            "top_signatures": top_signatures,
-            "open_cases": len(open_cases),
-            "report_chars": len(report_md),
-        }
-    )
-    slim_cases = [
-        {
-            "case_id": c.get("case_id"),
-            "job": c.get("job"),
-            "build": c.get("build"),
-            "signal": c.get("signal"),
-            "signature": c.get("signature"),
-            "status": c.get("status"),
-            "plan_source": c.get("plan_source"),
-        }
-        for c in cases[:50]
-    ]
-    await ctx.db.save_daily_report(
-        day=day, report_md=report_md[:20000], metrics=metrics, cases=slim_cases
-    )
     await ctx.evidence(
         "report_md",
-        report_md[:6000],
-        {
-            "mode": "daily",
-            "day": day,
-            "note": f"日报 {day}（{len(report_md)} 字，案例 {len(cases)} 条）",
-        },
+        report_md[:20000],
+        {"day": day, "mode": "daily", "note": f"日报（{len(report_md)} 字）"},
     )
     log.info("report_daily", extra={"ctx": {"day": day, "cases": len(cases)}})
-    return {"case_id": None, "day": day, "report_md": report_md[:20000], "metrics": metrics}
+    return {
+        "case_id": None,
+        "day": day,
+        "report_md": report_md[:20000],
+        "metrics": _metrics_jsonable({**metrics, "cases": [c.get("case_id") for c in cases]}),
+        "kb_writes": [],
+    }
 
 
 async def handler(ctx: Ctx) -> dict[str, Any]:
     payload = ctx.env.get("payload", {}) or {}
-    mode = payload.get("mode") or "daily"
+    mode = str(payload.get("mode") or "case")
     src = payload.get("input", {}) or {}
+    if mode == "daily":
+        day = str(src.get("day") or _today())
+        return await _daily_report(ctx, day)
+    if mode != "case":
+        raise Blocked("schema_invalid", f"reporting 不支持的 mode={mode}")
     case_id = src.get("case_id") or ctx.env.get("case_id")
-    day = src.get("day") or _today()
-
-    if mode == "case":
-        if not case_id:
-            raise Blocked("schema_invalid", "reporting:case 缺少 case_id")
-        return await _case_report(ctx, str(case_id))
-    return await _daily_report(ctx, str(day))
+    if not case_id:
+        raise Blocked("schema_invalid", "reporting(case) 输入缺少 case_id")
+    return await _case_report(ctx, case_id)

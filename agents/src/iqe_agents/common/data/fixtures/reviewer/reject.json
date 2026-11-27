@@ -1,0 +1,12 @@
+{
+  "note": "闸门 1 直接驳回：证据只够写成一行摘要",
+  "gate1": {
+    "verdict": "reject",
+    "reason_code": "insufficient_evidence",
+    "requested_info": [
+      "原始 job 的完整 console 日志",
+      "失败阶段与用例名"
+    ],
+    "notes": "日志被截断，分诊结论不可用，直接驳回"
+  }
+}

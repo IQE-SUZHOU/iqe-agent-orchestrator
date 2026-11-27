@@ -1,0 +1,11 @@
+{
+  "fixed": true,
+  "change_type": "config",
+  "target": "ci/config/jenkins-agent.yaml",
+  "diff_summary": "把 executor 内存上限从 4G 调到 8G，并新增构建前健康检查",
+  "work_item_key": "ADO-4822",
+  "risk": "medium",
+  "notes": [
+    "配置类修复：需要下一次构建验证"
+  ]
+}

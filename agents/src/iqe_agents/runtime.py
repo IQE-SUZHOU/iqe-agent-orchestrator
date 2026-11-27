@@ -2,7 +2,10 @@
 
 顺序遵循 design/02 §10：先发布 result（等 publisher confirm）再 ack；
 发布失败则不 ack，由 broker redeliver，幂等层吸收重复。
-毒消息（schema 不合法 / ttl 过期且无法处理）nack(requeue=False) 进 DLQ。
+毒消息（schema 不合法 / mode 不属于本 stage）nack(requeue=False) 进 DLQ。
+
+mode 与 IO 契约的唯一权威是 ``common/data/schemas/stage-contracts.json``（见 common.contracts），
+本文件不再维护任何 stage/mode 的白名单副本。
 """
 
 from __future__ import annotations
@@ -15,12 +18,15 @@ import aio_pika
 
 from .common import bus as bus_mod
 from .common.config import cfg
+from .common.contracts import is_valid_mode, stage_modes, validate_stage_contract
 from .common.db import DB
 from .common.envelope import age_ms, load, make_result
 from .common.logs import counters, log_with, setup_logging
 from .common.mock import Fixtures, jitter, pick_scenario, should_fail
 
 log = logging.getLogger("iqe_agents.runtime")
+
+MODE_MISMATCH = "mode_not_owned"
 
 
 class MockRetry(Exception):
@@ -47,6 +53,10 @@ class Ctx:
     refs: list[dict] = field(default_factory=list)
     extra: dict = field(default_factory=dict)
 
+    @property
+    def mode(self) -> str:
+        return str((self.env.get("payload") or {}).get("mode") or "")
+
     async def evidence(self, kind: str, body: str, meta: dict | None = None) -> str:
         uri = await self.db.save_evidence(
             case_id=self.env.get("case_id"),
@@ -71,7 +81,7 @@ class AgentRuntime:
     def __init__(self, stage: str, handler, *, modes: list[str] | None = None):
         self.stage = stage
         self.handler = handler
-        self.modes = modes
+        self.modes = tuple(modes or stage_modes(stage))
         self.bus: bus_mod.Bus | None = None
         self.db: DB | None = None
         self.fixtures = Fixtures()
@@ -93,7 +103,7 @@ class AgentRuntime:
         await serve(
             build_app(
                 title=f"ci-agent-{self.stage}",
-                probes={"stage": self.stage, "queue": qname, "binding": bind},
+                probes={"stage": self.stage, "queue": qname, "binding": bind, "modes": self.modes},
             )
         )
         log_with(
@@ -103,6 +113,7 @@ class AgentRuntime:
             stage=self.stage,
             queue=qname,
             binding=bind,
+            modes=list(self.modes),
             amqp_host=cfg.amqp_url.split("@")[-1],
         )
         counters.inc("ci_agent_ready_total", stage=self.stage)
@@ -133,12 +144,14 @@ class AgentRuntime:
 
         case_id, key = env.get("case_id"), env["idempotency_key"]
         attempt = env.get("attempt", 1)
+        mode = str((env.get("payload") or {}).get("mode") or "")
         scenario = pick_scenario(env)
         log_with(
             log,
             "info",
             "cmd_consumed",
             stage=self.stage,
+            mode=mode,
             case_id=case_id,
             attempt=attempt,
             key=key,
@@ -172,9 +185,9 @@ class AgentRuntime:
             await message.ack()
             return
 
-        # 入参契约校验（stage-contracts 为权威）
+        # 入参契约校验（stage-contracts 为权威：mode 归属 + payload 形状）
         try:
-            self._validate_input(env)
+            self._validate_input(env, mode)
         except ValueError as exc:
             counters.inc("ci_stage_results_total", stage=self.stage, status="rejected")
             log_with(
@@ -182,6 +195,7 @@ class AgentRuntime:
                 "error",
                 "input_contract_violation",
                 stage=self.stage,
+                mode=mode,
                 key=key,
                 err=str(exc)[:300],
             )
@@ -195,7 +209,7 @@ class AgentRuntime:
             output = await self.handler(ctx)
             if output is None:
                 output = {}
-            self._check_output(output)
+            self._check_output(output, case_id)
             result = make_result(
                 command=env,
                 status="ok",
@@ -242,6 +256,7 @@ class AgentRuntime:
             "info",
             "result_published",
             stage=self.stage,
+            mode=mode,
             case_id=case_id,
             key=key,
             status=result["payload"]["status"],
@@ -251,7 +266,7 @@ class AgentRuntime:
     async def _publish(self, command: dict, result: dict) -> None:
         await self.bus.publish_result(command, result)
 
-    def _check_output(self, output: dict) -> None:
+    def _check_output(self, output: dict, case_id: str | None) -> None:
         """出参契约软校验：违反只告警（便于观察 Mock 与契约漂移），不阻断链路。"""
         import jsonschema
 
@@ -266,48 +281,34 @@ class AgentRuntime:
                 "warn",
                 "output_contract_violation",
                 stage=self.stage,
-                case_id=self.env.get("case_id"),
+                case_id=case_id,
                 err=str(exc.message)[:300],
             )
 
-    def _validate_input(self, env: dict) -> None:
-        contracts = {
-            "monitor": ("monitor", env["payload"].get("mode", "scan")),
-            "triage": ("triage", env["payload"].get("mode", "full")),
-            "reproduction": ("reproduction", env["payload"].get("mode", "run")),
-            "ticket": ("ticket", env["payload"].get("mode", "run")),
-            "review": ("review", env["payload"].get("mode", "run")),
-            "reporting": ("reporting", env["payload"].get("mode", "case")),
-        }
-        stage_key, mode = contracts[self.stage]
-        schema = validate_stage_contract(stage_key, "input")
-        payload = dict(env["payload"])
-        try:
-            import jsonschema
+    def _validate_input(self, env: dict, mode: str) -> None:
+        if not is_valid_mode(self.stage, mode):
+            raise ValueError(
+                f"stage={self.stage} 不接受 mode={mode!r}（允许 {list(stage_modes(self.stage))}）"
+            )
+        import jsonschema
 
-            jsonschema.validate(instance=payload, schema=schema)
+        try:
+            jsonschema.validate(
+                instance=dict(env["payload"]), schema=validate_stage_contract(self.stage, "input")
+            )
         except jsonschema.ValidationError as exc:
-            raise ValueError(f"stage={stage_key} mode={mode}: {exc.message}") from exc
+            raise ValueError(f"stage={self.stage} mode={mode}: {exc.message}") from exc
 
     def __repr__(self) -> str:  # pragma: no cover
-        return f"<AgentRuntime stage={self.stage}>"
+        return f"<AgentRuntime stage={self.stage} modes={self.modes}>"
 
 
-def cfg_schemas_dir() -> str:
-    """schemas 目录：与 Config.schemas_dir 同源，便于单测覆盖。"""
-    return cfg.schemas_dir
-
-
-def validate_stage_contract(stage: str, which: str) -> dict:
-    """从 schemas/stage-contracts.json 取出某 stage 的 input/output JSON Schema。"""
-    import json
-    from pathlib import Path
-
-    # 资源统一走 iqe_agents.common.paths（包内 data/schemas，或 SCHEMAS_DIR 覆盖）
-    doc = json.loads((Path(cfg_schemas_dir()) / "stage-contracts.json").read_text(encoding="utf-8"))
-    stage_doc = doc["stages"][stage]
-    base = {"$defs": doc["$defs"], "type": "object"}
-    schema = dict(base)
-    schema.update(stage_doc[which])
-    schema["required"] = stage_doc[which].get("required", [])
-    return schema
+__all__ = [
+    "AgentRuntime",
+    "Blocked",
+    "Ctx",
+    "MockRetry",
+    "is_valid_mode",
+    "stage_modes",
+    "validate_stage_contract",
+]

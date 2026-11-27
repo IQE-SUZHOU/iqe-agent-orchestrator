@@ -1,285 +1,1359 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ci-triage/schemas/stage-contracts.json",
-  "title": "六段 Stage 输入/输出契约（权威定义：mode 与 payload 以本文件为准）",
+  "title": "八段 Stage 输入/输出契约（权威定义：mode 与 payload 以本文件为准）",
   "x-mode-authority": {
-    "monitor": ["scan"],
-    "triage": ["full", "classify_only"],
-    "reproduction": ["run"],
-    "ticket": ["run"],
-    "review": ["run"],
-    "reporting": ["case", "daily"]
+    "monitor": [
+      "scan"
+    ],
+    "triage": [
+      "classify"
+    ],
+    "reviewer": [
+      "gate1",
+      "gate2",
+      "gate3"
+    ],
+    "remediation": [
+      "fix"
+    ],
+    "reproduction": [
+      "evidence",
+      "verify"
+    ],
+    "regression": [
+      "check",
+      "bisect"
+    ],
+    "ticketing": [
+      "create"
+    ],
+    "reporting": [
+      "case",
+      "daily"
+    ]
   },
   "$defs": {
-    "signal": { "enum": ["none", "error"] },
-    "rca": { "enum": ["driver", "test", "environment", "infrastructure", "unknown"] },
-    "reproducible": { "enum": ["yes", "no", "flaky", "blocked"] },
-    "case_ref": { "type": "object", "required": ["case_id"], "properties": { "case_id": { "type": "string" } } }
+    "signal": {
+      "enum": [
+        "none",
+        "error"
+      ]
+    },
+    "rca": {
+      "enum": [
+        "driver",
+        "test",
+        "environment",
+        "infrastructure",
+        "unknown"
+      ]
+    },
+    "path": {
+      "enum": [
+        "internal",
+        "external"
+      ]
+    },
+    "reproducible": {
+      "enum": [
+        "yes",
+        "no",
+        "flaky",
+        "blocked"
+      ]
+    },
+    "mode": {
+      "enum": [
+        "classify",
+        "gate1",
+        "gate2",
+        "gate3",
+        "fix",
+        "evidence",
+        "verify",
+        "check",
+        "bisect",
+        "create",
+        "case",
+        "daily"
+      ]
+    },
+    "case_ref": {
+      "type": "object",
+      "required": [
+        "case_id"
+      ],
+      "properties": {
+        "case_id": {
+          "type": "string"
+        }
+      }
+    }
   },
   "stages": {
     "monitor": {
       "command_subject": "ci.cmd.monitor.scan",
       "result_subject": "ci.result.monitor",
-      "modes": ["scan"],
+      "modes": [
+        "scan"
+      ],
       "input": {
-        "required": ["mode", "input"],
+        "required": [
+          "mode",
+          "input"
+        ],
         "properties": {
-          "mode": { "const": "scan" },
+          "mode": {
+            "const": "scan"
+          },
           "input": {
             "type": "object",
-            "required": ["scan_id", "lookback"],
+            "required": [
+              "scan_id",
+              "lookback"
+            ],
             "properties": {
-              "scan_id": { "type": "string" },
-              "lookback": { "type": "string", "maxLength": 16 },
-              "jobs_filter": { "type": "array", "items": { "type": "string" }, "maxItems": 20 },
-              "dry_run": { "type": "boolean" }
+              "scan_id": {
+                "type": "string"
+              },
+              "lookback": {
+                "type": "string",
+                "maxLength": 16
+              },
+              "jobs_filter": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 20
+              },
+              "dry_run": {
+                "type": "boolean"
+              }
             }
           }
         }
       },
       "output": {
-        "required": ["scan_id", "observations", "counts"],
+        "required": [
+          "scan_id",
+          "observations",
+          "counts"
+        ],
         "properties": {
-          "scan_id": { "type": "string" },
+          "scan_id": {
+            "type": "string"
+          },
           "observations": {
             "type": "array",
             "maxItems": 200,
             "items": {
               "type": "object",
-              "required": ["source", "job", "build", "result", "signal"],
+              "required": [
+                "source",
+                "job",
+                "build",
+                "result",
+                "signal"
+              ],
               "properties": {
-                "obs_id": { "type": "string" },
-                "source": { "type": "string", "maxLength": 32 },
-                "job": { "type": "string", "maxLength": 128 },
-                "build": { "type": ["integer", "null"] },
-                "result": { "type": "string", "maxLength": 32 },
-                "signal": { "$ref": "#/$defs/signal" },
-                "signature": { "type": ["string", "null"] },
-                "noise_score": { "type": "number", "minimum": 0, "maximum": 1 },
-                "known_issue_ref": { "type": ["string", "null"] },
-                "promoted_reason": { "type": ["string", "null"] },
-                "suppressed": { "type": "boolean" },
-                "log_excerpt": { "type": ["string", "null"], "maxLength": 4000 },
-                "evidence_refs": { "type": "array", "maxItems": 20 },
-                "context": { "type": "object" }
+                "obs_id": {
+                  "type": "string"
+                },
+                "source": {
+                  "type": "string",
+                  "maxLength": 32
+                },
+                "job": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "build": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "result": {
+                  "type": "string",
+                  "maxLength": 32
+                },
+                "signal": {
+                  "$ref": "#/$defs/signal"
+                },
+                "signature": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "noise_score": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "known_issue_ref": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "promoted_reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "suppressed": {
+                  "type": "boolean"
+                },
+                "log_excerpt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 4000
+                },
+                "evidence_refs": {
+                  "type": "array",
+                  "maxItems": 20
+                },
+                "context": {
+                  "type": "object"
+                }
               }
             }
           },
           "counts": {
             "type": "object",
-            "required": ["observed", "promoted", "suppressed"],
+            "required": [
+              "observed",
+              "promoted",
+              "suppressed"
+            ],
             "properties": {
-              "observed": { "type": "integer", "minimum": 0 },
-              "promoted": { "type": "integer", "minimum": 0 },
-              "suppressed": { "type": "integer", "minimum": 0 }
+              "observed": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "promoted": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "suppressed": {
+                "type": "integer",
+                "minimum": 0
+              }
             }
           },
-          "scan_window": { "type": "string" },
-          "source_status": { "type": "array", "items": { "type": "object" } }
+          "scan_window": {
+            "type": "string"
+          },
+          "source_status": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
         }
       }
     },
     "triage": {
-      "command_subject": "ci.cmd.triage.run",
+      "command_subject": "ci.cmd.triage.classify",
       "result_subject": "ci.result.triage",
-      "modes": ["full", "classify_only"],
+      "modes": [
+        "classify"
+      ],
       "input": {
-        "required": ["mode", "input"],
+        "required": [
+          "mode",
+          "input"
+        ],
         "properties": {
-          "mode": { "enum": ["full", "classify_only"] },
+          "mode": {
+            "const": "classify"
+          },
           "input": {
             "type": "object",
-            "required": ["case_id", "source", "job", "signal"],
+            "required": [
+              "case_id",
+              "source",
+              "job",
+              "signal"
+            ],
             "properties": {
-              "case_id": { "type": "string" },
-              "build": { "type": ["integer", "null"] },
-              "source": { "type": "string" },
-              "job": { "type": "string" },
-              "signal": { "$ref": "#/$defs/signal" },
-              "signature": { "type": ["string", "null"] },
-              "log_excerpt": { "type": ["string", "null"] },
-              "context": { "type": "object" },
-              "evidence_refs": { "type": "array", "maxItems": 20 }
+              "case_id": {
+                "type": "string"
+              },
+              "build": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "source": {
+                "type": "string"
+              },
+              "job": {
+                "type": "string"
+              },
+              "signal": {
+                "$ref": "#/$defs/signal"
+              },
+              "signature": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "log_excerpt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "context": {
+                "type": "object"
+              },
+              "evidence_refs": {
+                "type": "array",
+                "maxItems": 20
+              },
+              "requested_focus": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 500
+              }
             }
           }
         }
       },
       "output": {
-        "required": ["case_id", "rca", "repro_eligible", "evidence"],
+        "required": [
+          "case_id",
+          "rca",
+          "path",
+          "confidence",
+          "evidence"
+        ],
         "properties": {
-          "case_id": { "type": "string" },
-          "rca": { "$ref": "#/$defs/rca" },
-          "component": { "type": "string", "maxLength": 128 },
-          "os_stage": { "type": ["string", "null"], "maxLength": 64 },
-          "signature": { "type": ["string", "null"] },
-          "duplicate_of": { "type": ["string", "null"] },
-          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-          "key_frames": { "type": "array", "maxItems": 12 },
-          "repro_eligible": { "type": "boolean" },
-          "repro_block_reason": { "type": ["string", "null"] },
-          "triage_notes": { "type": "array", "maxItems": 10 },
-          "evidence": { "type": "array", "maxItems": 30 },
-          "skill_refs": { "type": "array", "maxItems": 10 },
-          "llm_calls": { "type": "integer", "minimum": 0, "maximum": 1 }
+          "case_id": {
+            "type": "string"
+          },
+          "rca": {
+            "$ref": "#/$defs/rca"
+          },
+          "path": {
+            "$ref": "#/$defs/path"
+          },
+          "component": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "os_stage": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          },
+          "signature": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "duplicate_of": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "key_frames": {
+            "type": "array",
+            "maxItems": 12
+          },
+          "routed_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 300
+          },
+          "kb_refs": {
+            "type": "array",
+            "maxItems": 10
+          },
+          "triage_notes": {
+            "type": "array",
+            "maxItems": 10
+          },
+          "evidence": {
+            "type": "array",
+            "maxItems": 30
+          },
+          "skill_refs": {
+            "type": "array",
+            "maxItems": 10
+          },
+          "llm_calls": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      }
+    },
+    "reviewer": {
+      "command_subject": "ci.cmd.reviewer.{gate1|gate2|gate3}",
+      "result_subject": "ci.result.reviewer",
+      "modes": [
+        "gate1",
+        "gate2",
+        "gate3"
+      ],
+      "input": {
+        "required": [
+          "mode",
+          "input"
+        ],
+        "properties": {
+          "mode": {
+            "enum": [
+              "gate1",
+              "gate2",
+              "gate3"
+            ]
+          },
+          "input": {
+            "type": "object",
+            "required": [
+              "case_id",
+              "source",
+              "job",
+              "signal",
+              "rca"
+            ],
+            "properties": {
+              "case_id": {
+                "type": "string"
+              },
+              "build": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "source": {
+                "type": "string"
+              },
+              "job": {
+                "type": "string"
+              },
+              "signal": {
+                "$ref": "#/$defs/signal"
+              },
+              "rca": {
+                "$ref": "#/$defs/rca"
+              },
+              "component": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "signature": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "confidence": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "key_frames": {
+                "type": "array",
+                "maxItems": 12
+              },
+              "evidence_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "remediation": {
+                "type": "object"
+              },
+              "reproduction": {
+                "type": "object"
+              },
+              "regression": {
+                "type": "object"
+              },
+              "ticketing": {
+                "type": "object"
+              },
+              "requested_focus": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 500
+              },
+              "loop_seq": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5
+              }
+            }
+          }
+        }
+      },
+      "output": {
+        "required": [
+          "case_id",
+          "gate",
+          "verdict"
+        ],
+        "properties": {
+          "case_id": {
+            "type": "string"
+          },
+          "gate": {
+            "enum": [
+              "gate1",
+              "gate2",
+              "gate3"
+            ]
+          },
+          "verdict": {
+            "enum": [
+              "approve",
+              "rework",
+              "needs_info",
+              "reject"
+            ]
+          },
+          "decision": {
+            "enum": [
+              "internal",
+              "external",
+              "none"
+            ]
+          },
+          "reason_code": {
+            "enum": [
+              "ok",
+              "insufficient_evidence",
+              "inconsistent_evidence",
+              "wrong_path",
+              "missing_repro",
+              "fix_not_verified",
+              "missing_ticket_sections",
+              "duplicate_ticket",
+              "wrong_owner",
+              "mock_reject",
+              "loop_exhausted"
+            ]
+          },
+          "requested_info": {
+            "type": "array",
+            "maxItems": 10
+          },
+          "checks": {
+            "type": "array",
+            "maxItems": 20
+          },
+          "quality_scores": {
+            "type": "object"
+          },
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 1000
+          }
+        }
+      }
+    },
+    "remediation": {
+      "command_subject": "ci.cmd.remediation.fix",
+      "result_subject": "ci.result.remediation",
+      "modes": [
+        "fix"
+      ],
+      "input": {
+        "required": [
+          "mode",
+          "input"
+        ],
+        "properties": {
+          "mode": {
+            "const": "fix"
+          },
+          "input": {
+            "type": "object",
+            "required": [
+              "case_id",
+              "source",
+              "job",
+              "rca"
+            ],
+            "properties": {
+              "case_id": {
+                "type": "string"
+              },
+              "build": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "source": {
+                "type": "string"
+              },
+              "job": {
+                "type": "string"
+              },
+              "rca": {
+                "$ref": "#/$defs/rca"
+              },
+              "component": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "signature": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "key_frames": {
+                "type": "array",
+                "maxItems": 12
+              },
+              "kb_fix_refs": {
+                "type": "array",
+                "maxItems": 10
+              },
+              "requested_focus": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 500
+              }
+            }
+          }
+        }
+      },
+      "output": {
+        "required": [
+          "case_id",
+          "fixed",
+          "change_type",
+          "target",
+          "diff_summary"
+        ],
+        "properties": {
+          "case_id": {
+            "type": "string"
+          },
+          "fixed": {
+            "type": "boolean"
+          },
+          "change_type": {
+            "enum": [
+              "script",
+              "config",
+              "test",
+              "data"
+            ]
+          },
+          "target": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "diff_summary": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "work_item_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          },
+          "work_item_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 256
+          },
+          "risk": {
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "adopted_from_kb": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 128
+          },
+          "evidence": {
+            "type": "array",
+            "maxItems": 30
+          },
+          "notes": {
+            "type": "array",
+            "maxItems": 10
+          }
         }
       }
     },
     "reproduction": {
-      "command_subject": "ci.cmd.reproduction.run",
+      "command_subject": "ci.cmd.reproduction.{evidence|verify}",
       "result_subject": "ci.result.reproduction",
-      "modes": ["run"],
+      "modes": [
+        "evidence",
+        "verify"
+      ],
       "input": {
-        "required": ["mode", "input"],
+        "required": [
+          "mode",
+          "input"
+        ],
         "properties": {
-          "mode": { "const": "run" },
+          "mode": {
+            "enum": [
+              "evidence",
+              "verify"
+            ]
+          },
           "input": {
             "type": "object",
-            "required": ["case_id", "source", "job", "rca"],
+            "required": [
+              "case_id",
+              "source",
+              "job",
+              "rca"
+            ],
             "properties": {
-              "case_id": { "type": "string" },
-              "build": { "type": ["integer", "null"] },
-              "source": { "type": "string" },
-              "job": { "type": "string" },
-              "rca": { "$ref": "#/$defs/rca" },
-              "signature": { "type": ["string", "null"] },
-              "key_frames": { "type": "array", "maxItems": 12 },
-              "requested_focus": { "type": ["string", "null"], "maxLength": 500 }
+              "case_id": {
+                "type": "string"
+              },
+              "build": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "source": {
+                "type": "string"
+              },
+              "job": {
+                "type": "string"
+              },
+              "rca": {
+                "$ref": "#/$defs/rca"
+              },
+              "component": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "signature": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "key_frames": {
+                "type": "array",
+                "maxItems": 12
+              },
+              "remediation": {
+                "type": "object"
+              },
+              "requested_focus": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 500
+              }
             }
           }
         }
       },
       "output": {
-        "required": ["case_id", "reproducible"],
+        "required": [
+          "case_id",
+          "mode",
+          "reproducible"
+        ],
         "properties": {
-          "case_id": { "type": "string" },
-          "reproducible": { "$ref": "#/$defs/reproducible" },
-          "attempts": { "type": "integer", "minimum": 0, "maximum": 10 },
-          "matrix": { "type": "array", "maxItems": 10 },
-          "steps_summary": { "type": "array", "maxItems": 12 },
-          "new_evidence": { "type": "array", "maxItems": 30 },
-          "blocked_reason": { "type": ["string", "null"] },
-          "log_excerpt": { "type": ["string", "null"], "maxLength": 4000 }
+          "case_id": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "evidence",
+              "verify"
+            ]
+          },
+          "reproducible": {
+            "$ref": "#/$defs/reproducible"
+          },
+          "attempts": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10
+          },
+          "matrix": {
+            "type": "array",
+            "maxItems": 10
+          },
+          "steps_summary": {
+            "type": "array",
+            "maxItems": 12
+          },
+          "failing_tests": {
+            "type": "array",
+            "maxItems": 20
+          },
+          "passing_tests": {
+            "type": "array",
+            "maxItems": 20
+          },
+          "fix_verified": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "new_evidence": {
+            "type": "array",
+            "maxItems": 30
+          },
+          "blocked_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "log_excerpt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 4000
+          }
         }
       }
     },
-    "ticket": {
-      "command_subject": "ci.cmd.ticket.run",
-      "result_subject": "ci.result.ticket",
-      "modes": ["run"],
+    "regression": {
+      "command_subject": "ci.cmd.regression.{check|bisect}",
+      "result_subject": "ci.result.regression",
+      "modes": [
+        "check",
+        "bisect"
+      ],
       "input": {
-        "required": ["mode", "input"],
+        "required": [
+          "mode",
+          "input"
+        ],
         "properties": {
-          "mode": { "const": "run" },
+          "mode": {
+            "enum": [
+              "check",
+              "bisect"
+            ]
+          },
           "input": {
             "type": "object",
-            "required": ["case_id", "source", "job", "signal", "rca"],
+            "required": [
+              "case_id",
+              "source",
+              "job",
+              "rca"
+            ],
             "properties": {
-              "case_id": { "type": "string" },
-              "build": { "type": ["integer", "null"] },
-              "source": { "type": "string" },
-              "job": { "type": "string" },
-              "signal": { "$ref": "#/$defs/signal" },
-              "signature": { "type": ["string", "null"] },
-              "rca": { "$ref": "#/$defs/rca" },
-              "reproducible": { "type": ["string", "null"] },
-              "requested_focus": { "type": ["string", "null"] }
+              "case_id": {
+                "type": "string"
+              },
+              "build": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "source": {
+                "type": "string"
+              },
+              "job": {
+                "type": "string"
+              },
+              "rca": {
+                "$ref": "#/$defs/rca"
+              },
+              "component": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "signature": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reproduction": {
+                "type": "object"
+              },
+              "baseline": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 64
+              },
+              "change_window": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 128
+              },
+              "requested_focus": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 500
+              }
             }
           }
         }
       },
       "output": {
-        "required": ["case_id", "backend", "ticket_status"],
+        "required": [
+          "case_id",
+          "mode",
+          "is_regression"
+        ],
         "properties": {
-          "case_id": { "type": "string" },
-          "backend": { "type": "string", "maxLength": 32 },
-          "external_key": { "type": ["string", "null"], "maxLength": 64 },
-          "url": { "type": ["string", "null"], "maxLength": 256 },
-          "ticket_status": { "enum": ["created", "drafted", "linked_duplicate", "failed"] },
-          "duplicate_of": { "type": ["string", "null"] },
-          "ticket_priority": { "enum": ["P0", "P1", "P2", "P3"] },
-          "assignee_team": { "type": ["string", "null"], "maxLength": 64 },
-          "linked_prs": { "type": "array", "maxItems": 10 },
-          "sections": { "type": "array", "maxItems": 20 },
-          "audit": { "type": "object" }
+          "case_id": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "check",
+              "bisect"
+            ]
+          },
+          "is_regression": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "baseline": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          },
+          "change_window": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 128
+          },
+          "bisected": {
+            "type": "boolean"
+          },
+          "guilty_patch": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "commit": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "pr": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 64
+              },
+              "author": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 64
+              },
+              "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "rationale": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 500
+              }
+            }
+          },
+          "candidates": {
+            "type": "array",
+            "maxItems": 20
+          },
+          "evidence": {
+            "type": "array",
+            "maxItems": 30
+          },
+          "notes": {
+            "type": "array",
+            "maxItems": 10
+          }
         }
       }
     },
-    "review": {
-      "command_subject": "ci.cmd.review.run",
-      "result_subject": "ci.result.review",
-      "modes": ["run"],
+    "ticketing": {
+      "command_subject": "ci.cmd.ticketing.create",
+      "result_subject": "ci.result.ticketing",
+      "modes": [
+        "create"
+      ],
       "input": {
-        "required": ["mode", "input"],
+        "required": [
+          "mode",
+          "input"
+        ],
         "properties": {
-          "mode": { "const": "run" },
+          "mode": {
+            "const": "create"
+          },
           "input": {
             "type": "object",
-            "required": ["case_id", "source", "job", "signal", "rca"],
+            "required": [
+              "case_id",
+              "source",
+              "job",
+              "signal",
+              "rca"
+            ],
             "properties": {
-              "case_id": { "type": "string" },
-              "build": { "type": ["integer", "null"] },
-              "source": { "type": "string" },
-              "job": { "type": "string" },
-              "signal": { "$ref": "#/$defs/signal" },
-              "signature": { "type": ["string", "null"] },
-              "rca": { "$ref": "#/$defs/rca" },
-              "confidence": { "type": ["number", "null"] },
-              "reproducible": { "type": ["string", "null"] },
-              "ticket_status": { "type": ["string", "null"] },
-              "ticket_sections": { "type": "array", "maxItems": 20 },
-              "duplicate_of": { "type": ["string", "null"] },
-              "evidence_count": { "type": "integer", "minimum": 0 },
-              "requested_focus": { "type": ["string", "null"] },
-              "loop_seq": { "type": "integer", "minimum": 1, "maximum": 5 }
+              "case_id": {
+                "type": "string"
+              },
+              "build": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "source": {
+                "type": "string"
+              },
+              "job": {
+                "type": "string"
+              },
+              "signal": {
+                "$ref": "#/$defs/signal"
+              },
+              "rca": {
+                "$ref": "#/$defs/rca"
+              },
+              "component": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reproduction": {
+                "type": "object"
+              },
+              "regression": {
+                "type": "object"
+              },
+              "requested_focus": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 500
+              },
+              "duplicate_of": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 64
+              }
             }
           }
         }
       },
       "output": {
-        "required": ["case_id", "verdict"],
+        "required": [
+          "case_id",
+          "backend",
+          "ticket_status"
+        ],
         "properties": {
-          "case_id": { "type": "string" },
-          "verdict": { "enum": ["approve", "needs_info", "reject"] },
-          "reason_code": { "enum": ["ok", "insufficient_evidence", "inconsistent_evidence",
-                                    "missing_repro", "missing_ticket_sections", "duplicate_ticket",
-                                    "missing_triage", "mock_reject", "loop_exhausted"] },
-          "requested_info": { "type": "array", "maxItems": 10 },
-          "checks": { "type": "array", "maxItems": 20 },
-          "quality_scores": { "type": "object" },
-          "notes": { "type": ["string", "null"], "maxLength": 1000 }
+          "case_id": {
+            "type": "string"
+          },
+          "backend": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "external_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 256
+          },
+          "ticket_status": {
+            "enum": [
+              "created",
+              "drafted",
+              "linked_duplicate",
+              "failed"
+            ]
+          },
+          "duplicate_of": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "priority": {
+            "enum": [
+              "P0",
+              "P1",
+              "P2",
+              "P3"
+            ]
+          },
+          "assignee_team": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          },
+          "linked_patches": {
+            "type": "array",
+            "maxItems": 10
+          },
+          "sections": {
+            "type": "array",
+            "maxItems": 20
+          },
+          "audit": {
+            "type": "object"
+          }
         }
       }
     },
     "reporting": {
       "command_subject": "ci.cmd.reporting.{case|daily}",
       "result_subject": "ci.result.reporting",
-      "modes": ["case", "daily"],
+      "modes": [
+        "case",
+        "daily"
+      ],
       "input": {
-        "required": ["mode", "input"],
+        "required": [
+          "mode",
+          "input"
+        ],
         "properties": {
-          "mode": { "enum": ["case", "daily"] },
+          "mode": {
+            "enum": [
+              "case",
+              "daily"
+            ]
+          },
           "input": {
             "type": "object",
             "properties": {
-              "case_id": { "type": ["string", "null"] },
-              "day": { "type": ["string", "null"] }
+              "case_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "day": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
             }
           }
         }
       },
       "output": {
         "properties": {
-          "case_id": { "type": ["string", "null"] },
-          "day": { "type": ["string", "null"] },
-          "report_md": { "type": "string", "maxLength": 20000 },
-          "metrics": { "type": "object" }
+          "case_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "day": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "report_md": {
+            "type": "string",
+            "maxLength": 20000
+          },
+          "metrics": {
+            "type": "object"
+          },
+          "kb_writes": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "required": [
+                "kind",
+                "component",
+                "summary"
+              ],
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "failure",
+                    "fix",
+                    "regression",
+                    "guilty_patch",
+                    "best_practice"
+                  ]
+                },
+                "component": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "signature": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 200
+                },
+                "summary": {
+                  "type": "string",
+                  "maxLength": 500
+                },
+                "case_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          }
         }
       }
     }
   },
   "x-path-matrix": {
-    "s1_lite": ["triage:classify_only"],
-    "s2_full": ["triage:full", "reproduction:run", "ticket:run", "review:run", "reporting:case"],
-    "s3_direct_report": ["triage:classify_only", "reporting:case"]
+    "s1_observe_only": [
+      "triage:classify",
+      "reporting:case"
+    ],
+    "s2_full_internal": [
+      "triage:classify",
+      "reviewer:gate1",
+      "remediation:fix",
+      "reproduction:verify",
+      "reviewer:gate2",
+      "reporting:case"
+    ],
+    "s2_full_external_regression": [
+      "triage:classify",
+      "reviewer:gate1",
+      "reproduction:evidence",
+      "regression:check",
+      "regression:bisect",
+      "ticketing:create",
+      "reviewer:gate3",
+      "reporting:case"
+    ],
+    "s2_full_external_no_regression": [
+      "triage:classify",
+      "reviewer:gate1",
+      "reproduction:evidence",
+      "regression:check",
+      "ticketing:create",
+      "reviewer:gate3",
+      "reporting:case"
+    ],
+    "s3_test_no_repro": [
+      "triage:classify",
+      "reviewer:gate1",
+      "regression:check",
+      "ticketing:create",
+      "reviewer:gate3",
+      "reporting:case"
+    ]
   }
 }

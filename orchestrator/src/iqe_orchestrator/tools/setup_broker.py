@@ -15,7 +15,16 @@ import urllib.parse
 
 import requests
 
-STAGES = ["monitor", "triage", "reproduction", "ticket", "review", "reporting"]
+STAGES = [
+    "monitor",
+    "triage",
+    "reviewer",
+    "remediation",
+    "reproduction",
+    "regression",
+    "ticketing",
+    "reporting",
+]
 QUEUES = ["q.agent." + s for s in STAGES] + [
     "q.orch.results",
     "q.orch.events",

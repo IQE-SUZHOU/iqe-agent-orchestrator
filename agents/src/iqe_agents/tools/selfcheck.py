@@ -1,14 +1,17 @@
-#!/usr/bin/env python
-"""离线自检：不依赖 RabbitMQ / Postgres，直接调用六个 stage 剧本，断言场景行为与输出契约。
+"""离线自检：不依赖 RabbitMQ / Postgres，直接调用八个 Agent 剧本（按 mode 分派），
+断言「12 阶段 / 两条分支 / 三道闸门」的 Mock 行为与输出契约。
 
 用法：ci-selfcheck（console script）或 python -m iqe_agents.tools.selfcheck
-退出码 0 = 全绿；每个 stage × 场景打印一行 PASS。
+退出码 0 = 全绿；每项断言打印一行 PASS。
 
 覆盖：
-1) 六个剧本的输出全部通过 schemas/stage-contracts.json 的 output 契约（jsonschema 2020-12）；
+1) monitor(scan) / triage(classify) / remediation(fix) / reproduction(evidence|verify) /
+   regression(check|bisect) / ticketing(create) / reviewer(gate1|gate2|gate3) /
+   reporting(case|daily) 的输出全部通过 schemas/stage-contracts.json（jsonschema 2020-12）；
 2) 19 份 Mock CI feed 的 Monitor 计数（observed / promoted / suppressed）与签名家族；
-3) 每个场景的行为核对（Blocked 的 code、reproducible、ticket_status、verdict 等）；
-4) 三份 plan 夹具对照 schemas/plan.schema.json（合法 / 非法）。
+3) 各 mode 的行为核对（分诊路径预判、修复采纳知识库、复现与验证、回归与二分、
+   三道闸门结论、工单优先级、报告与 kb_writes）；
+4) plan 夹具对照 schemas/plan.schema.json 与计划语义（双分支 / 回炉）。
 """
 
 from __future__ import annotations
@@ -22,40 +25,45 @@ import jsonschema
 
 from iqe_agents.common import paths
 from iqe_agents.common.config import cfg
-from iqe_agents.common.mock import Fixtures, jitter, pick_scenario
+from iqe_agents.common.contracts import MODE_AUTHORITY
+from iqe_agents.common.mock import Fixtures, pick_scenario
 from iqe_agents.common.tools import fingerprint
 from iqe_agents.monitor.playbook import handler as monitor_handler
+from iqe_agents.regression.playbook import handler as regression_handler
+from iqe_agents.remediation.playbook import handler as remediation_handler
 from iqe_agents.reporting.playbook import handler as reporting_handler
 from iqe_agents.reproduction.playbook import handler as repro_handler
-from iqe_agents.review.playbook import handler as review_handler
+from iqe_agents.reviewer.playbook import handler as reviewer_handler
 from iqe_agents.runtime import Blocked, Ctx, validate_stage_contract
-from iqe_agents.ticket.playbook import handler as ticket_handler
+from iqe_agents.ticketing.playbook import handler as ticketing_handler
 from iqe_agents.triage.playbook import handler as triage_handler
 
 DATA = paths.data_dir()  # schemas / workflows / fixtures 都在包内 iqe_agents/common/data/
 
 FAILURES: list[str] = []
+CHECKS = [0]
 MONITOR_ROWS: list[dict] = []
 
 HANDLERS = {
     "monitor": monitor_handler,
     "triage": triage_handler,
+    "reviewer": reviewer_handler,
+    "remediation": remediation_handler,
     "reproduction": repro_handler,
-    "ticket": ticket_handler,
-    "review": review_handler,
+    "regression": regression_handler,
+    "ticketing": ticketing_handler,
     "reporting": reporting_handler,
 }
 
 # 自测必须离线且快：把 mock 行为注入关掉（jitter / 随机失败）
-cfg.mock_delay_ms = "0-0"
+cfg.mock_delay_ms = "0:0"  # 只能是 "lo:hi" 形式，写成 "0-0" 会回落默认 150:500
 cfg.mock_failure_rate = 0.0
-agentkit_agent_runtime_jitter = jitter
 FIXTURES = Fixtures(str(DATA / "fixtures"))
 
 
 # --------------------------------------------------------------------- 内存替身 DB
 class FakeDB:
-    """只需覆盖剧本会调用的那几个方法，语义对齐 agentkit/db.py。"""
+    """只需覆盖剧本会调用的那几个方法，语义对齐 common/db.py；同样是「按 stage/mode 存」。"""
 
     def __init__(self) -> None:
         self.evidence_rows: list[dict] = []
@@ -65,8 +73,13 @@ class FakeDB:
         self.daily_reports: dict[str, dict] = {}
         self.tickets: dict[str, dict] = {}
         self.reviews: list[dict] = []
+        self.remediations: dict[str, dict] = {}
+        self.verifications: dict[tuple[str, str], dict] = {}
+        self.regressions: dict[tuple[str, str], dict] = {}
+        self.kb_entries: list[dict] = []
         self._ev_id = 0
 
+    # ---------- evidence / cases / stage_runs
     async def save_evidence(self, *, case_id, stage, kind, meta, body, scan_id=None) -> str:
         self._ev_id += 1
         uri = f"db://evidence/{self._ev_id}"
@@ -172,6 +185,7 @@ class FakeDB:
         output=None,
         run_id="R-fake",
         scan_id=None,
+        step_id=None,
     ) -> None:
         now = dt.datetime.now()
         self.stage_runs.append(
@@ -180,7 +194,7 @@ class FakeDB:
                 "run_id": run_id,
                 "scan_id": scan_id,
                 "stage": stage,
-                "step_id": f"{stage}1",
+                "step_id": step_id or f"{stage}_{mode}",
                 "mode": mode,
                 "attempt": attempt,
                 "status": status,
@@ -206,6 +220,24 @@ class FakeDB:
             )
         ]
 
+    async def stage_outputs(self, case_id: str) -> dict[str, list[dict]]:
+        """按 stage 聚合成功输出（reviewer 一计划跑三次，按 mode 区分）。"""
+        out: dict[str, list[dict]] = {}
+        for row in self.stage_runs:
+            if row.get("case_id") != case_id or row.get("status") != "done":
+                continue
+            if not row.get("output"):
+                continue
+            out.setdefault(row["stage"], []).append(
+                {
+                    "mode": row.get("mode"),
+                    "step_id": row.get("step_id"),
+                    "attempt": row.get("attempt") or 1,
+                    "output": row["output"],
+                }
+            )
+        return out
+
     async def get_stage_output(self, case_id: str, stage: str) -> dict | None:
         rows = [
             r
@@ -220,6 +252,7 @@ class FakeDB:
     async def scan_close(self, *, scan_id, counts) -> None:
         self.scans.append({"scan_id": scan_id, "counts": counts, "started_at": dt.datetime.now()})
 
+    # ---------- 日报
     async def daily_metrics(self, day: str) -> dict:
         cases = [c for c in self.cases.values() if str(c.get("created_at"))[:10] == day]
         from collections import Counter
@@ -256,15 +289,53 @@ class FakeDB:
     async def get_daily_report(self, day: str) -> dict | None:
         return self.daily_reports.get(day)
 
+    # ---------- 工单 / 三道闸门 / 修复 / 复现 / 回归 / 知识库
     async def save_ticket(self, *, case_id, backend, output) -> None:
         self.tickets[case_id] = {"case_id": case_id, "backend": backend, **output}
 
-    async def save_review(self, *, case_id, output, loop_seq) -> None:
-        self.reviews.append({"case_id": case_id, "loop_seq": loop_seq, **output})
+    async def save_review(
+        self, *, case_id: str, output: dict, loop_seq: int, gate: str | None = None
+    ) -> None:
+        self.reviews.append(
+            {
+                "case_id": case_id,
+                "gate": gate or output.get("gate"),
+                "loop_seq": loop_seq,
+                "verdict": output.get("verdict"),
+                "reason_code": output.get("reason_code"),
+                "requested_info": list(output.get("requested_info") or []),
+            }
+        )
+
+    async def save_remediation(self, *, case_id: str, output: dict) -> None:
+        self.remediations[case_id] = dict(output)
+
+    async def save_verification(self, *, case_id: str, output: dict) -> None:
+        self.verifications[(case_id, str(output.get("mode") or "evidence"))] = dict(output)
+
+    async def save_regression(self, *, case_id: str, output: dict) -> None:
+        self.regressions[(case_id, str(output.get("mode") or "check"))] = dict(output)
+
+    async def kb_write(self, entry: dict) -> None:
+        self.kb_entries.append(dict(entry))
+
+    async def kb_search(
+        self, *, component: str | None = None, signature: str | None = None, limit: int = 5
+    ) -> list[dict]:
+        rows = [
+            e
+            for e in self.kb_entries
+            if (not component or e.get("component") == component)
+            or (
+                signature and str(e.get("signature") or "").startswith(str(signature).split(":")[0])
+            )
+        ]
+        return rows[-limit:]
 
 
 # --------------------------------------------------------------------- 断言工具
 def check(label: str, cond: bool, detail: str = "") -> bool:
+    CHECKS[0] += 1
     if cond:
         print(f"PASS {label}")
         return True
@@ -299,7 +370,7 @@ class Runner:
         env = {
             "run_id": f"R-{scenario}",
             "stage": stage,
-            "step_id": f"{stage}_1",
+            "step_id": f"{stage}_{mode}",
             "attempt": 1,
             "case_id": case_id,
             "scan_id": scan_id,
@@ -482,7 +553,7 @@ async def selfcheck_monitor() -> None:
                     (o.get("context") or {}).get("suppressed_reason") == "duplicate_signature_merge"
                     for o in suppressed
                 ),
-                f"promoted={[o.get('build') for o in promoted]} kept_ctx={ {k: kept_ctx.get(k) for k in ('duplicate_merge_count','duplicate_builds')} }",
+                f"promoted={[o.get('build') for o in promoted]} kept_ctx={ {k: kept_ctx.get(k) for k in ('duplicate_merge_count', 'duplicate_builds')} }",
             )
         if feed == "known_issue_noise":
             check(
@@ -562,7 +633,7 @@ async def monitor_promoted_obs(r: Runner, feed: str) -> dict:
     return obs[0]
 
 
-def triage_input(obs: dict, case_id: str, mode: str = "full") -> dict:
+def triage_input(obs: dict, case_id: str, *, requested_focus: str | None = None) -> dict:
     return {
         "case_id": case_id,
         "build": obs.get("build"),
@@ -573,7 +644,7 @@ def triage_input(obs: dict, case_id: str, mode: str = "full") -> dict:
         "log_excerpt": obs.get("log_excerpt"),
         "context": dict(obs.get("context") or {}),
         "evidence_refs": list(obs.get("evidence_refs") or []),
-        "requested_focus": None,
+        "requested_focus": requested_focus,
     }
 
 
@@ -581,889 +652,1416 @@ def downstream_scenario(obs: dict) -> str:
     return str((obs.get("context") or {}).get("mock_scenario") or "default")
 
 
-# --------------------------------------------------------------------- Triage
-async def selfcheck_triage() -> None:
-    print("\n=== Triage：分诊结论 / SKILL 卡片 / 复现资格 ===")
-    cases = {
-        "new_failure": {
-            "rca": "driver",
-            "conf": 0.82,
-            "skill": "driver-failure-triage",
-            "repro": True,
-            "feed": "new_failure",
-        },
-        "duplicate_merge": {
-            "rca": "test",
-            "conf": 0.76,
-            "skill": "test-failure-triage",
-            "repro": True,
-            "feed": "duplicate_merge",
-        },
-        "aborted_infra": {
-            "rca": "infrastructure",
-            "conf": 0.88,
-            "skill": "environment-failure-triage",
-            "repro": False,
-            "feed": "aborted_infra",
-        },
-        "mixed": {
-            "rca": "environment",
-            "conf": 0.68,
-            "skill": "environment-failure-triage",
-            "repro": True,
-            "feed": "mixed",
-        },
-        "unknown_low_confidence": {
-            "rca": "unknown",
-            "conf": 0.30,
-            "skill": "environment-failure-triage",
-            "repro": True,
-            "feed": "unknown_low_confidence",
-        },
-    }
-    for name, exp in cases.items():
-        r = Runner()
-        obs = await monitor_promoted_obs(r, exp["feed"])
-        scen = downstream_scenario(obs)
-        out = await r.run(
-            "triage",
-            mode="full",
-            scenario=scen,
-            case_id=f"case-{name}",
-            input_obj=triage_input(obs, f"case-{name}"),
-        )
-        check(
-            f"triage/{name} rca={out.get('rca')} confidence={out.get('confidence')} "
-            f"signature={out.get('signature')} repro_eligible={out.get('repro_eligible')}",
-            out.get("rca") == exp["rca"]
-            and abs(float(out.get("confidence") or 0) - exp["conf"]) < 1e-6
-            and out.get("repro_eligible") is exp["repro"]
-            and out.get("skill_refs") == [exp["skill"]]
-            and (out.get("signature") or "").startswith(
-                f"{obs.get('signature', '').split(':')[0]}:"
-            ),
-            json.dumps(
-                {
-                    k: out.get(k)
-                    for k in ("rca", "confidence", "repro_eligible", "skill_refs", "signature")
-                },
-                ensure_ascii=False,
-            ),
-        )
-        check(
-            f"triage/{name} 证据含 distilled_log + skill_card + triage_note",
-            {"distilled_log", "skill_card", "triage_note"}
-            <= set(kinds(r.db, f"case-{name}", "triage")),
-            kinds(r.db, f"case-{name}", "triage"),
-        )
-        if exp["rca"] == "unknown":
-            check(
-                f"triage/{name} 置信度低于 0.70（会被复核第 3 条拦下）",
-                float(out.get("confidence") or 1) < 0.70,
-                str(out.get("confidence")),
-            )
-        if exp["rca"] == "infrastructure":
-            check(
-                f"triage/{name} 不占用重跑机位（repro_block_reason）",
-                bool(out.get("repro_block_reason"))
-                and "机位" in str(out.get("repro_block_reason")),
-                str(out.get("repro_block_reason")),
-            )
-        check(
-            f"triage/{name} key_frames 非空且 triage_notes<=10",
-            bool(out.get("key_frames")) and len(out.get("triage_notes") or []) <= 10,
-            json.dumps(
-                {
-                    "key_frames": len(out.get("key_frames") or []),
-                    "triage_notes": len(out.get("triage_notes") or []),
-                }
-            ),
-        )
+# --------------------------------------------------------------------- 下游剧本共用输入
+async def obs_where(r: Runner, feed: str, prefix: str) -> dict:
+    """取某份 feed 里签名族匹配 prefix 的第一条晋升观测。"""
+    out = await run_monitor(r, feed)
+    for obs in obs_of(out):
+        if obs.get("signal") != "error" or obs.get("suppressed"):
+            continue
+        if str(obs.get("signature") or "").startswith(prefix):
+            return obs
+    raise LookupError(f"feed {feed} 里没有 {prefix}* 的晋升观测")
 
-    # 无新失败（signal=none）+ classify_only：只蒸馏归档，不占机位
+
+async def triage_case(
+    feed: str,
+    *,
+    scenario: str | None = None,
+    case_id: str = "C-tri",
+    prefix: str = "",
+    requested_focus: str | None = None,
+) -> tuple[Runner, dict]:
     r = Runner()
-    out = await run_monitor(r, "all_success")
-    obs = obs_of(out)[0]
-    out2 = await r.run(
+    obs = await obs_where(r, feed, prefix) if prefix else await monitor_promoted_obs(r, feed)
+    out = await r.run(
         "triage",
-        mode="classify_only",
-        scenario="warming",
-        case_id="case-warming",
-        input_obj=triage_input(obs, "case-warming", "classify_only"),
+        mode="classify",
+        scenario=scenario or downstream_scenario(obs),
+        input_obj=triage_input(obs, case_id, requested_focus=requested_focus),
+        case_id=case_id,
+    )
+    return r, out
+
+
+def triage_summary(out: dict) -> str:
+    return json.dumps(
+        {k: out.get(k) for k in ("rca", "path", "component", "confidence", "duplicate_of")},
+        ensure_ascii=False,
+    )
+
+
+# --------------------------------------------------------------------- Triage（classify）
+async def selfcheck_triage() -> None:
+    print("\n=== Triage（classify）：根因 / 路径预判 / 知识库 / 查重 ===")
+    r, out = await triage_case("new_failure", case_id="C-tri-1")
+    check(
+        "triage/new_failure → driver + external，置信度 0.82",
+        (out["rca"], out["path"], out["component"], out["confidence"])
+        == ("driver", "external", "driver", 0.82),
+        triage_summary(out),
     )
     check(
-        "triage/warming(classify_only,signal=none) rca=unknown / 不复现 / key_frames=2 / notes=1",
-        out2.get("rca") == "unknown"
-        and out2.get("repro_eligible") is False
-        and len(out2.get("key_frames") or []) == 2
-        and len(out2.get("triage_notes") or []) == 1
-        and out2.get("llm_calls") == 0
-        and (
-            "classify_only" in str(out2.get("repro_block_reason"))
-            or "signal=none" in str(out2.get("repro_block_reason"))
-        ),
+        "triage/new_failure 归属 OS 阶段并引用知识库/技能卡",
+        out.get("os_stage") == "staging-test"
+        and out.get("kb_refs", [""])[0] == "KB-ISSUE-001"
+        and out.get("skill_refs") == ["driver-failure-triage"],
         json.dumps(
-            {
-                k: out2.get(k)
-                for k in (
-                    "rca",
-                    "repro_eligible",
-                    "key_frames",
-                    "triage_notes",
-                    "llm_calls",
-                    "repro_block_reason",
-                )
-            },
-            ensure_ascii=False,
+            {k: out.get(k) for k in ("os_stage", "kb_refs", "skill_refs")}, ensure_ascii=False
+        ),
+    )
+    got_kinds = kinds(r.db, case_id="C-tri-1", stage="triage")
+    check(
+        "triage 写了 distilled_log / skill_card / kb_lookup / triage_note 四类证据",
+        {"distilled_log", "skill_card", "kb_lookup", "triage_note"} <= set(got_kinds),
+        str(got_kinds),
+    )
+    check(
+        "triage 的 triage_notes 写明路径预判理由",
+        any("路径预判" in n for n in out.get("triage_notes") or []),
+        json.dumps(out.get("triage_notes"), ensure_ascii=False)[:300],
+    )
+
+    _, out = await triage_case("duplicate_merge", case_id="C-tri-2")
+    check(
+        "triage/duplicate_merge → 测试类失败走 internal（0.76）",
+        (out["rca"], out["path"], out["component"], out["confidence"])
+        == ("test", "internal", "test", 0.76),
+        triage_summary(out),
+    )
+
+    _, out = await triage_case("mixed", prefix="toolchain", case_id="C-tri-3")
+    check(
+        "triage/mixed → toolchain 编译失败判 environment + internal",
+        (out["rca"], out["path"], out["component"]) == ("environment", "internal", "toolchain")
+        and "KB-FIX-002" in (out.get("kb_refs") or []),
+        triage_summary(out),
+    )
+
+    _, out = await triage_case("many_errors", prefix="apt-repo", case_id="C-tri-4")
+    check(
+        "triage/many_errors(apt-repo) → 命中已知问题台账，给出 duplicate_of",
+        out["rca"] == "environment" and str(out.get("duplicate_of") or "").startswith("case:"),
+        triage_summary(out),
+    )
+
+    _, out = await triage_case("unknown_low_confidence", case_id="C-tri-5")
+    check(
+        "triage/unknown_low_confidence → rca=unknown、置信度 0.30（闸门 1 会打回）",
+        (out["rca"], out["confidence"], out["path"]) == ("unknown", 0.3, "external"),
+        triage_summary(out),
+    )
+
+    _, out = await triage_case("new_failure", scenario="internal_script_fix", case_id="C-tri-6")
+    check(
+        "triage/internal_script_fix → infrastructure + internal + ci-infra（0.88）",
+        (out["rca"], out["path"], out["component"], out["confidence"])
+        == ("infrastructure", "internal", "ci-infra", 0.88)
+        and "KB-FIX-001" in (out.get("kb_refs") or []),
+        triage_summary(out),
+    )
+
+    _, out_alias = await triage_case(
+        "new_failure", scenario="internal-script-fix", case_id="C-tri-7"
+    )
+    check(
+        "triage 剧本名兼容连字符 / 下划线（internal-script-fix 等价）",
+        triage_summary(out_alias) == triage_summary(out),
+        f"{triage_summary(out_alias)} != {triage_summary(out)}",
+    )
+
+    _, out = await triage_case("new_failure", case_id="C-tri-8", requested_focus="补 dmesg 尾部")
+    check(
+        "triage 回炉时把 requested_focus 写进结论要点",
+        any("补 dmesg 尾部" in n for n in out.get("triage_notes") or []),
+        json.dumps(out.get("triage_notes"), ensure_ascii=False)[-200:],
+    )
+
+    # 成功构建：signal=none 不分流、不判复现
+    r = Runner()
+    out = await run_monitor(r, "all_success")
+    success = next(o for o in obs_of(out) if o.get("signal") == "none")
+    tri = await r.run(
+        "triage",
+        mode="classify",
+        scenario="warming",
+        input_obj=triage_input(success, "C-tri-9"),
+        case_id="C-tri-9",
+    )
+    check(
+        "triage/signal=none → 只归档不分流（rca=unknown、component=none）",
+        tri["rca"] == "unknown"
+        and tri.get("component") == "none"
+        and str(tri.get("routed_reason") or "").startswith("signal=none")
+        and len(tri.get("key_frames") or []) <= 2,
+        json.dumps(
+            {k: tri.get(k) for k in ("rca", "component", "routed_reason")}, ensure_ascii=False
         ),
     )
 
 
-# --------------------------------------------------------------------- Reproduction
-async def repro_input(r: Runner, feed: str, case_id: str) -> tuple[dict, dict]:
-    obs = await monitor_promoted_obs(r, feed)
-    scen = downstream_scenario(obs)
-    t = await r.run(
-        "triage", mode="full", scenario=scen, case_id=case_id, input_obj=triage_input(obs, case_id)
+# --------------------------------------------------------------------- Remediation（fix）
+def remediation_input(
+    *,
+    case_id: str,
+    rca: str = "environment",
+    component: str = "ci-infra",
+    requested_focus: str | None = None,
+) -> dict:
+    return {
+        "case_id": case_id,
+        "source": "monitor",
+        "job": "os-staging-install",
+        "build": 1234,
+        "rca": rca,
+        "component": component,
+        "signature": f"{component}:infra-abort",
+        "requested_focus": requested_focus,
+    }
+
+
+async def selfcheck_remediation() -> None:
+    print("\n=== Remediation（fix）：修复改动 / ADO 工作项 / 知识库采纳 ===")
+    r = Runner()
+    out = await r.run(
+        "remediation",
+        mode="fix",
+        scenario="default",
+        input_obj=remediation_input(case_id="C-rem-1"),
+        case_id="C-rem-1",
     )
-    src = triage_input(obs, case_id)
-    src.update(
-        {"rca": t["rca"], "signature": t["signature"], "key_frames": t.get("key_frames") or []}
+    check(
+        "remediation/default → fixed=true + script + staging_install.sh",
+        (out["fixed"], out["change_type"], out["target"], out["risk"])
+        == (True, "script", "ci/scripts/staging_install.sh", "low"),
+        json.dumps(out, ensure_ascii=False)[:300],
     )
-    return scen, src
+    check(
+        "remediation/default 采纳知识库 KB-FIX-001 并建 ADO 工作项",
+        out.get("adopted_from_kb") == "KB-FIX-001"
+        and out.get("work_item_key") == "ADO-4821"
+        and str(out.get("work_item_url") or "").endswith("/4821"),
+        json.dumps({k: out.get(k) for k in ("adopted_from_kb", "work_item_key", "work_item_url")}),
+    )
+    check(
+        "remediation 写了 remediation_plan 证据",
+        "remediation_plan" in kinds(r.db, case_id="C-rem-1", stage="remediation"),
+        str(kinds(r.db, case_id="C-rem-1", stage="remediation")),
+    )
+
+    out = await Runner().run(
+        "remediation",
+        mode="fix",
+        scenario="default",
+        input_obj=remediation_input(case_id="C-rem-2", rca="driver", component="driver"),
+        case_id="C-rem-2",
+    )
+    check(
+        "remediation/rca=driver → 不自动改产品代码（fixed=false + 转派）",
+        out["fixed"] is False
+        and out["target"] == "kernel/drivers/amdgpu"
+        and out.get("work_item_key") is None
+        and any("只做转派" in n for n in out.get("notes") or []),
+        json.dumps(
+            {k: out.get(k) for k in ("fixed", "target", "work_item_key")}, ensure_ascii=False
+        ),
+    )
+
+    out = await Runner().run(
+        "remediation",
+        mode="fix",
+        scenario="insufficient",
+        input_obj=remediation_input(case_id="C-rem-3"),
+        case_id="C-rem-3",
+    )
+    check(
+        "remediation/insufficient → fixed=false、risk=high、交人工",
+        out["fixed"] is False and out["risk"] == "high" and "未找到" in out["diff_summary"],
+        json.dumps({k: out.get(k) for k in ("fixed", "risk", "diff_summary")}, ensure_ascii=False)[
+            :250
+        ],
+    )
+
+    out = await Runner().run(
+        "remediation",
+        mode="fix",
+        scenario="rollback",
+        input_obj=remediation_input(case_id="C-rem-4", component="network"),
+        case_id="C-rem-4",
+    )
+    check(
+        "remediation/rollback → 配置类修复，且不硬套别的组件的知识库方案",
+        (out["fixed"], out["change_type"], out["target"], out["risk"])
+        == (True, "config", "ci/config/jenkins-agent.yaml", "medium")
+        and out.get("adopted_from_kb") is None,
+        json.dumps({k: out.get(k) for k in ("change_type", "adopted_from_kb")}, ensure_ascii=False),
+    )
+
+    out = await Runner().run(
+        "remediation",
+        mode="fix",
+        scenario="default",
+        input_obj=remediation_input(case_id="C-rem-5", requested_focus="补修复前后对比"),
+        case_id="C-rem-5",
+    )
+    check(
+        "remediation 闸门 2 打回后记录重做要求",
+        any("打回后重做" in n and "补修复前后对比" in n for n in out.get("notes") or []),
+        json.dumps(out.get("notes"), ensure_ascii=False)[-250:],
+    )
+
+    try:
+        await Runner().run(
+            "remediation",
+            mode="fix",
+            scenario="default",
+            input_obj={"source": "monitor", "job": "j", "rca": "environment"},
+            case_id=None,
+        )
+        check("remediation 缺 case_id → Blocked(schema_invalid)", False, "没有抛出 Blocked")
+    except Blocked as b:
+        check(
+            "remediation 缺 case_id → Blocked(schema_invalid)",
+            b.code == "schema_invalid",
+            f"code={b.code}",
+        )
+
+
+# --------------------------------------------------------------------- Reproduction（evidence | verify）
+def repro_input(
+    *, case_id: str, rca: str = "driver", component: str = "driver", fixed: bool = False
+) -> dict:
+    return {
+        "case_id": case_id,
+        "source": "monitor",
+        "job": "os-staging-test",
+        "build": 1261,
+        "rca": rca,
+        "component": component,
+        "signature": f"{component}:crash",
+        "key_frames": ["amdgpu GPU page fault"],
+        "remediation": {"fixed": fixed, "change_type": "script", "target": "ci/scripts/x.sh"},
+    }
 
 
 async def selfcheck_reproduction() -> None:
-    print("\n=== Reproduction：受控重跑 / Blocked 分支 ===")
-    expectations = [("blocked_no_machine", "source_unavailable")]
-    for feed, code in expectations:
-        r = Runner()
-        scen, src = await repro_input(r, feed, f"case-{feed}")
-        try:
-            await r.run(
-                "reproduction", mode="run", scenario=scen, case_id=f"case-{feed}", input_obj=src
-            )
-            check(f"reproduction/{feed} Blocked({code})", False, "没有抛出 Blocked")
-        except Blocked as b:
-            check(
-                f"reproduction/{feed} Blocked({code})",
-                b.code == code,
-                f"code={b.code} detail={b.detail}",
-            )
-            check(
-                f"reproduction/{feed} Blocked 前已写 repro_log 证据",
-                "repro_log" in kinds(r.db, f"case-{feed}", "reproduction"),
-                kinds(r.db, f"case-{feed}"),
-            )
-
-    for feed, expected in [("default", "yes"), ("flaky", "flaky"), ("not_reproducible", "no")]:
-        r = Runner()
-        obs_feed = {
-            "default": "default",
-            "flaky": "flaky_unstable",
-            "not_reproducible": "not_reproducible",
-        }[feed]
-        obs = await monitor_promoted_obs(r, obs_feed)
-        scen = downstream_scenario(obs)
-        src = triage_input(obs, f"case-{feed}")
-        src.update(
-            {"rca": "driver", "signature": obs.get("signature"), "key_frames": ["oops first line"]}
-        )
-        out = await r.run(
-            "reproduction", mode="run", scenario=scen, case_id=f"case-{feed}", input_obj=src
-        )
-        check(
-            f"reproduction/{feed} reproducible={out.get('reproducible')} attempts={out.get('attempts')}",
-            out.get("reproducible") == expected
-            and int(out.get("attempts") or 0) >= 2
-            and len(out.get("matrix") or []) >= 1
-            and bool(out.get("log_excerpt")),
-            json.dumps(
-                {k: out.get(k) for k in ("reproducible", "attempts", "matrix")}, ensure_ascii=False
-            ),
-        )
-        check(
-            f"reproduction/{feed} 每条重跑都写 repro_log 证据",
-            kinds(r.db, f"case-{feed}", "reproduction").count("repro_log") >= 2,
-            kinds(r.db, f"case-{feed}", "reproduction"),
-        )
-
-    # infrastructure 类不做受控重跑（即使有 reproduction 步骤也必须 Blocked(disabled)）
+    print("\n=== Reproduction（evidence / verify）：4b 取证 + 5a 验证 ===")
     r = Runner()
-    obs = await monitor_promoted_obs(r, "aborted_infra")
-    src = triage_input(obs, "case-aborted")
-    src.update({"rca": "infrastructure", "signature": obs.get("signature"), "key_frames": []})
+    out = await r.run(
+        "reproduction",
+        mode="evidence",
+        scenario="default",
+        input_obj=repro_input(case_id="C-rep-1"),
+        case_id="C-rep-1",
+    )
+    check(
+        "reproduction/evidence → 复现 2 次、reproducible=yes、fix_verified=null",
+        (out["mode"], out["reproducible"], out["attempts"], out["fix_verified"])
+        == ("evidence", "yes", 2, None)
+        and len(out["matrix"]) == 2,
+        json.dumps({k: out.get(k) for k in ("mode", "reproducible", "attempts", "fix_verified")}),
+    )
+    got_kinds = kinds(r.db, case_id="C-rep-1", stage="reproduction")
+    check(
+        "reproduction 每次重跑一条 repro_log + 一份 repro_plan",
+        got_kinds.count("repro_log") == 2 and got_kinds.count("repro_plan") == 1,
+        str(got_kinds),
+    )
+
+    out = await Runner().run(
+        "reproduction",
+        mode="verify",
+        scenario="default",
+        input_obj=repro_input(case_id="C-rep-2", fixed=True),
+        case_id="C-rep-2",
+    )
+    check(
+        "reproduction/verify → 应用修复后 fix_verified=true",
+        (out["mode"], out["fix_verified"], out["attempts"]) == ("verify", True, 3),
+        json.dumps({k: out.get(k) for k in ("mode", "fix_verified", "attempts")}),
+    )
+
+    out = await Runner().run(
+        "reproduction",
+        mode="verify",
+        scenario="fixed_not_verified",
+        input_obj=repro_input(case_id="C-rep-3", fixed=True),
+        case_id="C-rep-3",
+    )
+    check(
+        "reproduction/verify 无效修复 → fix_verified=false（闸门 2 打回）",
+        out["fix_verified"] is False and out["reproducible"] == "yes",
+        json.dumps({k: out.get(k) for k in ("fix_verified", "reproducible")}),
+    )
+
+    out = await Runner().run(
+        "reproduction",
+        mode="verify",
+        scenario="default",
+        input_obj=repro_input(case_id="C-rep-4", fixed=False),
+        case_id="C-rep-4",
+    )
+    check(
+        "reproduction/verify 在 4a 未产出修复时不谎报验证通过",
+        out["fix_verified"] is False
+        and any("未产出可用修复" in s for s in out.get("steps_summary") or []),
+        json.dumps({k: out.get(k) for k in ("fix_verified", "steps_summary")}, ensure_ascii=False)[
+            :250
+        ],
+    )
+
+    out = await Runner().run(
+        "reproduction",
+        mode="evidence",
+        scenario="not_reproducible",
+        input_obj=repro_input(case_id="C-rep-5"),
+        case_id="C-rep-5",
+    )
+    check(
+        "reproduction/not_reproducible → reproducible=no 且写明原因",
+        out["reproducible"] == "no"
+        and bool(out.get("blocked_reason"))
+        and bool(out.get("log_excerpt")),
+        json.dumps({k: out.get(k) for k in ("reproducible", "blocked_reason")}, ensure_ascii=False),
+    )
+
+    out = await Runner().run(
+        "reproduction",
+        mode="evidence",
+        scenario="flaky",
+        input_obj=repro_input(case_id="C-rep-6"),
+        case_id="C-rep-6",
+    )
+    check(
+        "reproduction/flaky → reproducible=flaky（3 次两败一过）",
+        out["reproducible"] == "flaky" and out["attempts"] == 3,
+        json.dumps({k: out.get(k) for k in ("reproducible", "attempts")}),
+    )
+
+    r = Runner()
     try:
         await r.run(
             "reproduction",
-            mode="run",
-            scenario="aborted_infra",
-            case_id="case-aborted",
-            input_obj=src,
+            mode="evidence",
+            scenario="blocked_no_machine",
+            input_obj=repro_input(case_id="C-rep-7"),
+            case_id="C-rep-7",
         )
-        check("reproduction/infrastructure Blocked(disabled)", False, "没有抛出 Blocked")
+        check("reproduction/blocked_no_machine → Blocked(source_unavailable)", False, "没有抛出")
     except Blocked as b:
         check(
-            "reproduction/infrastructure Blocked(disabled)", b.code == "disabled", f"code={b.code}"
+            "reproduction/blocked_no_machine → Blocked(source_unavailable)",
+            b.code == "source_unavailable" and "repro_log" in kinds(r.db, case_id="C-rep-7"),
+            f"code={b.code}",
         )
 
-    # reproduction 夹具 sleep_s=45 → 编排层 15s step 超时会先判 timeout；剧本必须真的在等
-    r = Runner()
-    obs = await monitor_promoted_obs(r, "timeout")
-    src = triage_input(obs, "case-timeout")
-    src.update({"rca": "driver", "signature": obs.get("signature"), "key_frames": []})
     try:
-        await r.run(
+        await Runner().run(
             "reproduction",
-            mode="run",
-            scenario="timeout",
-            case_id="case-timeout",
-            input_obj=src,
-            timeout_s=2.0,
+            mode="evidence",
+            scenario="default",
+            input_obj=repro_input(case_id="C-rep-8", rca="infrastructure", component="ci-infra"),
+            case_id="C-rep-8",
         )
+        check("reproduction/rca=infrastructure → Blocked(disabled)", False, "没有抛出")
+    except Blocked as b:
         check(
-            "reproduction/timeout 长耗时（夹具 sleep_s=45，会被 step 超时截断）",
-            False,
-            "剧本没有按夹具等待",
+            "reproduction/rca=infrastructure → Blocked(disabled)（不占重跑机位）",
+            b.code == "disabled",
+            f"code={b.code}",
+        )
+
+    try:
+        await Runner().run(
+            "reproduction",
+            mode="report",
+            scenario="default",
+            input_obj=repro_input(case_id="C-rep-9"),
+            case_id="C-rep-9",
+        )
+        check("reproduction 非法 mode → Blocked(schema_invalid)", False, "没有抛出")
+    except Blocked as b:
+        check(
+            "reproduction 非法 mode → Blocked(schema_invalid)",
+            b.code == "schema_invalid",
+            f"code={b.code}",
+        )
+
+    # 夹具故意 sleep_s=75（> s2_full 里 e1 的 60s）：步骤超时 → retryable，重试耗尽后 blocked
+    t0 = dt.datetime.now()
+    raised = False
+    try:
+        await Runner().run(
+            "reproduction",
+            mode="evidence",
+            scenario="timeout",
+            input_obj=repro_input(case_id="C-rep-10"),
+            case_id="C-rep-10",
+            timeout_s=0.2,
         )
     except TimeoutError:
-        check("reproduction/timeout 长耗时（夹具 sleep_s=45，会被 step 超时截断）", True)
-
-    # 关掉重跑开关 → Blocked(disabled)
-    r = Runner()
-    obs = await monitor_promoted_obs(r, "new_failure")
-    src = triage_input(obs, "case-norepro")
-    src.update({"rca": "driver", "signature": obs.get("signature"), "key_frames": []})
-    cfg.repro_enabled = False
-    try:
-        await r.run(
-            "reproduction", mode="run", scenario="default", case_id="case-norepro", input_obj=src
-        )
-        check("reproduction/复现开关关闭 Blocked(disabled)", False, "没有抛出 Blocked")
-    except Blocked as b:
-        check("reproduction/复现开关关闭 Blocked(disabled)", b.code == "disabled", f"code={b.code}")
-    finally:
-        cfg.repro_enabled = True
-
-
-# --------------------------------------------------------------------- Ticket
-async def ticket_src(
-    r: Runner, feed: str, case_id: str, *, rca: str, reproducible: str | None
-) -> tuple[str, dict]:
-    obs = await monitor_promoted_obs(r, feed)
-    scen = downstream_scenario(obs)
-    src = triage_input(obs, case_id)
-    src.update(
-        {
-            "rca": rca,
-            "signature": obs.get("signature"),
-            "reproducible": reproducible,
-            "duplicate_of": None,
-        }
-    )
-    return scen, src
-
-
-async def selfcheck_ticket() -> None:
-    print("\n=== Ticket：成单状态 / 优先级 / 段落 ===")
-    r = Runner()
-    _scen, src = await ticket_src(r, "default", "case-ticket", rca="driver", reproducible="yes")
-    out = await r.run(
-        "ticket", mode="run", scenario="default", case_id="case-ticket", input_obj=src
-    )
-    keys = {s.get("key") for s in out.get("sections") or []}
+        raised = True
+    elapsed = (dt.datetime.now() - t0).total_seconds()
     check(
-        "ticket/default created + OST-* + P1 + OS-Driver + 段落齐全",
-        out.get("ticket_status") == "created"
-        and str(out.get("external_key") or "").startswith("OST-")
-        and out.get("ticket_priority") == "P1"
-        and out.get("assignee_team") == "OS-Driver"
-        and {"rca", "repro", "evidence", "impact", "next_steps"} <= keys
-        and all(str(s.get("content") or "").strip() for s in out.get("sections") or []),
-        json.dumps(
-            {
-                k: out.get(k)
-                for k in (
-                    "ticket_status",
-                    "external_key",
-                    "ticket_priority",
-                    "assignee_team",
-                    "sections",
-                )
-            },
-            ensure_ascii=False,
-        )[:400],
-    )
-    check(
-        "ticket/default 写了 ticket_payload 证据",
-        "ticket_payload" in kinds(r.db, "case-ticket", "ticket"),
-        kinds(r.db, "case-ticket", "ticket"),
+        "reproduction/timeout 夹具可被步骤超时打断（→retryable→DLQ）",
+        raised and elapsed < 5,
+        f"raised={raised} elapsed={elapsed:.1f}s",
     )
 
-    _scen, src = await ticket_src(r, "duplicate", "case-dup", rca="driver", reproducible="yes")
-    out = await r.run("ticket", mode="run", scenario="duplicate", case_id="case-dup", input_obj=src)
-    check(
-        "ticket/duplicate linked_duplicate OST-4821 且不开新单",
-        out.get("ticket_status") == "linked_duplicate"
-        and out.get("duplicate_of") == "OST-4821"
-        and out.get("external_key") is None,
-        json.dumps(
-            {k: out.get(k) for k in ("ticket_status", "duplicate_of", "external_key")},
-            ensure_ascii=False,
-        ),
-    )
 
-    cfg.ticket_autocreate = False
-    try:
-        r = Runner()
-        _scen, src = await ticket_src(r, "default", "case-draft", rca="driver", reproducible="yes")
-        out = await r.run(
-            "ticket", mode="run", scenario="default", case_id="case-draft", input_obj=src
-        )
-        check(
-            "ticket/autocreate=off drafted + DRAFT-*",
-            out.get("ticket_status") == "drafted"
-            and str(out.get("external_key") or "").startswith("DRAFT-")
-            and out.get("url") is None,
-            json.dumps(
-                {k: out.get(k) for k in ("ticket_status", "external_key", "url")},
-                ensure_ascii=False,
-            ),
-        )
-    finally:
-        cfg.ticket_autocreate = True
-
-    for feed, rca, repro, expected_prio, team in [
-        ("duplicate_merge", "test", "yes", "P2", "OS-QA"),
-        ("mixed", "environment", "no", "P3", "OS-Infra"),
-    ]:
-        r = Runner()
-        _scen, src = await ticket_src(r, feed, f"case-{feed}-t", rca=rca, reproducible=repro)
-        out = await r.run(
-            "ticket", mode="run", scenario="default", case_id=f"case-{feed}-t", input_obj=src
-        )
-        check(
-            f"ticket/{feed}({rca}/{repro}) 优先级 {expected_prio} 责任人 {team}",
-            out.get("ticket_priority") == expected_prio and out.get("assignee_team") == team,
-            json.dumps(
-                {k: out.get(k) for k in ("ticket_priority", "assignee_team")}, ensure_ascii=False
-            ),
-        )
-
-
-# --------------------------------------------------------------------- Review
-def review_src(**kw) -> dict:
-    base = {
-        "case_id": kw.get("case_id", "case-review"),
-        "source": "mock-jenkins",
-        "job": "os-staging-gfx-test",
-        "signal": kw.get("signal", "error"),
-        "build": 1203,
-        "signature": kw.get("signature", "driver:crash:aaaabbbbcccc"),
-        "rca": kw.get("rca", "driver"),
-        "confidence": kw.get("confidence", 0.82),
-        "key_frames": kw.get(
-            "key_frames", ["BUG: kernel NULL pointer dereference", "Oops#", "RIP: 0010:amdgpu+0x1f"]
-        ),
-        "reproducible": kw.get("reproducible", "yes"),
-        "ticket_status": kw.get("ticket_status", "created"),
-        "ticket_sections": kw.get(
-            "ticket_sections",
-            [
-                {"key": "rca", "title": "根因结论", "content": "驱动空指针"},
-                {"key": "repro", "title": "复现方法", "content": "同参重跑 2/2 复现"},
-                {"key": "evidence", "title": "证据清单", "content": "db://evidence/1"},
-                {"key": "impact", "title": "影响范围", "content": "staging 门禁"},
-                {"key": "next_steps", "title": "下一步", "content": "补丁评审"},
-            ],
-        ),
-        "duplicate_of": kw.get("duplicate_of"),
-        "evidence_count": kw.get("evidence_count", 6),
-        "requested_focus": kw.get("requested_focus"),
-        "loop_seq": kw.get("loop_seq", 1),
+# --------------------------------------------------------------------- Regression（check | bisect）
+def regression_input(*, case_id: str, component: str = "driver") -> dict:
+    return {
+        "case_id": case_id,
+        "source": "monitor",
+        "job": "os-staging-test",
+        "build": 1261,
+        "rca": "driver",
+        "component": component,
+        "signature": f"{component}:crash",
+        "reproduction": {"reproducible": "yes", "attempts": 2},
     }
-    base["repro_attempted"] = kw.get("repro_attempted", True)
+
+
+async def selfcheck_regression() -> None:
+    print("\n=== Regression（check / bisect）：5b 回归判定 + 6c guilty patch ===")
+    r = Runner()
+    out = await r.run(
+        "regression",
+        mode="check",
+        scenario="default",
+        input_obj=regression_input(case_id="C-reg-1"),
+        case_id="C-reg-1",
+    )
+    check(
+        "regression/check → is_regression=true，带基线与候选区间",
+        (out["mode"], out["is_regression"], out["baseline"], len(out["candidates"]))
+        == ("check", True, "staging-pass-2026-11-24", 3)
+        and out["guilty_patch"] is None,
+        json.dumps({k: out.get(k) for k in ("mode", "is_regression", "baseline")}),
+    )
+    check(
+        "regression/check 写了 regression_check 证据",
+        "regression_check" in kinds(r.db, case_id="C-reg-1", stage="regression"),
+        str(kinds(r.db, case_id="C-reg-1", stage="regression")),
+    )
+
+    out = await Runner().run(
+        "regression",
+        mode="check",
+        scenario="no_regression",
+        input_obj=regression_input(case_id="C-reg-2"),
+        case_id="C-reg-2",
+    )
+    check(
+        "regression/check 非回归 → 跳过 6c（is_regression=false）",
+        out["is_regression"] is False and any("环境问题" in n for n in out.get("notes") or []),
+        json.dumps(out.get("notes"), ensure_ascii=False)[:200],
+    )
+
+    out = await Runner().run(
+        "regression",
+        mode="bisect",
+        scenario="default",
+        input_obj=regression_input(case_id="C-reg-3"),
+        case_id="C-reg-3",
+    )
+    patch = out.get("guilty_patch") or {}
+    check(
+        "regression/bisect → 收敛到 a1b2c3d（PR-1187 / 0.86）",
+        out["bisected"] is True
+        and patch.get("commit") == "a1b2c3d"
+        and patch.get("pr") == "PR-1187"
+        and patch.get("confidence") == 0.86,
+        json.dumps(patch, ensure_ascii=False)[:250],
+    )
+
+    out = await Runner().run(
+        "regression",
+        mode="bisect",
+        scenario="inconclusive",
+        input_obj=regression_input(case_id="C-reg-4"),
+        case_id="C-reg-4",
+    )
+    check(
+        "regression/bisect 未收敛 → guilty_patch=null，知识库只作参考",
+        out["bisected"] is False
+        and out["guilty_patch"] is None
+        and any("KB-PATCH-001" in n for n in out.get("notes") or []),
+        json.dumps(out.get("notes"), ensure_ascii=False)[:250],
+    )
+
+    try:
+        await Runner().run(
+            "regression",
+            mode="triage",
+            scenario="default",
+            input_obj=regression_input(case_id="C-reg-5"),
+            case_id="C-reg-5",
+        )
+        check("regression 非法 mode → Blocked(schema_invalid)", False, "没有抛出")
+    except Blocked as b:
+        check(
+            "regression 非法 mode → Blocked(schema_invalid)",
+            b.code == "schema_invalid",
+            f"code={b.code}",
+        )
+
+
+# --------------------------------------------------------------------- Reviewer（gate1 | gate2 | gate3）
+def reviewer_input(*, case_id: str, path: str = "external", **kw) -> dict:
+    base = {
+        "case_id": case_id,
+        "source": "monitor",
+        "job": "os-staging-test",
+        "build": 1261,
+        "signal": "error",
+        "rca": "driver",
+        "component": "driver",
+        "path": path,
+        "confidence": 0.82,
+        "key_frames": ["amdgpu GPU page fault"],
+        "evidence_count": 6,
+        "signature": "driver:crash",
+        "loop_seq": 1,
+    }
+    base.update(kw)
     return base
 
 
-def check_by_id(out: dict, cid: str) -> dict:
-    return next((c for c in out.get("checks") or [] if c.get("id") == cid), {})
+def gate2_input(
+    *, case_id: str, fixed: bool = True, fix_verified: bool = True, target: str = "ci/scripts/x.sh"
+) -> dict:
+    return reviewer_input(
+        case_id=case_id,
+        remediation={"fixed": fixed, "change_type": "script", "target": target},
+        reproduction={
+            "mode": "verify",
+            "fix_verified": fix_verified,
+            "reproducible": "yes",
+            "attempts": 3,
+        },
+    )
 
 
-async def selfcheck_review() -> None:
-    print("\n=== Review：8 条机械预检与结论 ===")
+def gate3_input(
+    *,
+    case_id: str,
+    sections: list[dict] | None = None,
+    status: str = "created",
+    assignee: str = "OS-Driver",
+    duplicate_of: str | None = None,
+) -> dict:
+    return reviewer_input(
+        case_id=case_id,
+        ticketing={
+            "ticket_status": status,
+            "external_key": "OST-1001",
+            "duplicate_of": duplicate_of,
+            "assignee_team": assignee,
+            "sections": (
+                sections
+                if sections is not None
+                else [
+                    {"key": "rca", "content": "驱动缺陷"},
+                    {"key": "repro", "content": "复现 2 次"},
+                    {"key": "evidence", "content": "dmesg 尾部"},
+                    {"key": "impact", "content": "gfx1151"},
+                ]
+            ),
+        },
+    )
+
+
+async def selfcheck_reviewer() -> None:
+    print("\n=== Reviewer（gate1 / gate2 / gate3）：三道闸门的结论与回炉要求 ===")
     r = Runner()
     out = await r.run(
-        "review", mode="run", scenario="default", case_id="case-review", input_obj=review_src()
+        "reviewer",
+        mode="gate1",
+        scenario="default",
+        input_obj=reviewer_input(case_id="C-rev-1"),
+        case_id="C-rev-1",
     )
-    ids = [c.get("id") for c in out.get("checks") or []]
-    expected_ids = [
-        "evidence_present",
-        "evidence_count_ok",
-        "triage_confidence_ok",
-        "repro_conclusion",
-        "ticket_sections_nonempty",
-        "no_duplicate_ticket",
-        "signal_repro_consistent",
-        "loop_not_exhausted",
-    ]
-    check("review/default 8 条预检顺序与编号契约一致", ids == expected_ids, json.dumps(ids))
     check(
-        "review/default 全部通过 → approve/ok + quality_scores.overall",
-        out.get("verdict") == "approve"
-        and out.get("reason_code") == "ok"
-        and all(c.get("pass") for c in out.get("checks") or [])
-        and isinstance((out.get("quality_scores") or {}).get("overall"), (int, float)),
+        "reviewer/gate1 → approve + decision=external（放行外部路径）",
+        (out["gate"], out["verdict"], out["decision"], out["reason_code"])
+        == ("gate1", "approve", "external", "ok")
+        and [c["id"] for c in out["checks"]]
+        == ["evidence_present", "triage_confident", "path_known", "loop_not_exhausted"],
         json.dumps(
-            {k: out.get(k) for k in ("verdict", "reason_code", "quality_scores")},
-            ensure_ascii=False,
+            {k: out.get(k) for k in ("verdict", "decision", "reason_code")}, ensure_ascii=False
         ),
     )
+    rec = next((e for e in r.db.evidence_rows if e["kind"] == "review_record"), None) or {}
     check(
-        "review/default 写了 review_record 证据",
-        "review_record" in kinds(r.db, "case-review", "review"),
-        kinds(r.db, "case-review", "review"),
+        "reviewer 把闸门号写进 review_record 证据并给出质量分",
+        (rec.get("meta") or {}).get("gate") == "gate1"
+        and 0.0 <= float(out["quality_scores"]["overall"]) <= 1.0
+        and out["quality_scores"]["checks_total"] == len(out["checks"]),
+        json.dumps({k: out.get(k) for k in ("quality_scores",)}, ensure_ascii=False),
     )
 
-    # 计划里没有复现段：第 4 条必须判 pass（跳过），不能误判 missing_repro
-    out = await r.run(
-        "review",
-        mode="run",
-        scenario="warming_ok",
-        case_id="case-norepro-review",
-        input_obj=review_src(
-            case_id="case-norepro-review",
-            repro_attempted=False,
-            reproducible=None,
-            ticket_status=None,
-            ticket_sections=[],
-        ),
-    )
-    c4, c5 = check_by_id(out, "repro_conclusion"), check_by_id(out, "ticket_sections_nonempty")
-    check(
-        "review/计划无复现段：第 4 条 pass（跳过）",
-        c4.get("pass") is True and "跳过" in c4.get("detail", ""),
-        json.dumps(c4, ensure_ascii=False),
+    out = await Runner().run(
+        "reviewer",
+        mode="gate1",
+        scenario="gate1_internal",
+        input_obj=reviewer_input(case_id="C-rev-2"),
+        case_id="C-rev-2",
     )
     check(
-        "review/计划无 ticket：第 5 条 pass（跳过）",
-        c5.get("pass") is True and "跳过" in c5.get("detail", ""),
-        json.dumps(c5, ensure_ascii=False),
-    )
-    check(
-        "review/计划无复现段且无 ticket → 仍 approve",
-        out.get("verdict") == "approve",
-        out.get("reason_code"),
+        "reviewer/gate1 夹具可反转分诊预判 → decision=internal",
+        out["verdict"] == "approve" and out["decision"] == "internal",
+        json.dumps({k: out.get(k) for k in ("verdict", "decision")}),
     )
 
-    # 复现段执行了但没给结论
-    out = await r.run(
-        "review",
-        mode="run",
-        scenario="default",
-        case_id="case-missingrepro",
-        input_obj=review_src(case_id="case-missingrepro", reproducible=None),
+    out = await Runner().run(
+        "reviewer",
+        mode="gate1",
+        scenario="gate1_reject",
+        input_obj=reviewer_input(case_id="C-rev-3"),
+        case_id="C-rev-3",
     )
-    c4 = check_by_id(out, "repro_conclusion")
     check(
-        "review/复现无结论 → 第 4 条 fail → needs_info/missing_repro",
-        c4.get("pass") is False
-        and out.get("verdict") == "needs_info"
-        and out.get("reason_code") == "missing_repro"
-        and bool(out.get("requested_info")),
+        "reviewer/gate1 reject → decision=none 且给出补充清单",
+        out["verdict"] == "reject"
+        and out["decision"] == "none"
+        and out["reason_code"] == "insufficient_evidence"
+        and len(out["requested_info"]) == 2,
         json.dumps(
-            {k: out.get(k) for k in ("verdict", "reason_code", "requested_info")},
-            ensure_ascii=False,
+            {k: out.get(k) for k in ("verdict", "decision", "requested_info")}, ensure_ascii=False
         ),
     )
 
-    # 低置信度分诊 → 第 3 条 fail
-    out = await r.run(
-        "review",
-        mode="run",
-        scenario="unknown_low_confidence",
-        case_id="case-lowconf",
-        input_obj=review_src(case_id="case-lowconf", rca="unknown", confidence=0.30),
+    out = await Runner().run(
+        "reviewer",
+        mode="gate1",
+        scenario="default",
+        input_obj=reviewer_input(case_id="C-rev-4", rca="unknown", confidence=0.3),
+        case_id="C-rev-4",
     )
     check(
-        "review/低置信度 → 第 3 条 fail → needs_info/missing_triage",
-        check_by_id(out, "triage_confidence_ok").get("pass") is False
-        and out.get("verdict") == "needs_info"
-        and out.get("reason_code") == "missing_triage",
-        json.dumps({k: out.get(k) for k in ("verdict", "reason_code")}, ensure_ascii=False),
+        "reviewer/gate1 低置信度分诊 → needs_info（打回 2 Triage）",
+        out["verdict"] == "needs_info"
+        and out["decision"] == "none"
+        and "triage_confident" in [c["id"] for c in out["checks"] if not c["pass"]]
+        and bool(out["requested_info"]),
+        json.dumps({k: out.get(k) for k in ("verdict", "requested_info")}, ensure_ascii=False)[
+            :250
+        ],
     )
 
-    # 证据不足 → 第 1/2 条 fail
-    out = await r.run(
-        "review",
-        mode="run",
+    out = await Runner().run(
+        "reviewer",
+        mode="gate2",
         scenario="default",
-        case_id="case-noev",
-        input_obj=review_src(case_id="case-noev", evidence_count=0, key_frames=[]),
+        input_obj=gate2_input(case_id="C-rev-5"),
+        case_id="C-rev-5",
     )
     check(
-        "review/零证据 → 第 1、2 条 fail → needs_info/insufficient_evidence",
-        check_by_id(out, "evidence_present").get("pass") is False
-        and check_by_id(out, "evidence_count_ok").get("pass") is False
-        and out.get("reason_code") == "insufficient_evidence",
-        json.dumps({k: out.get(k) for k in ("verdict", "reason_code")}, ensure_ascii=False),
+        "reviewer/gate2 → 修复已生效，approve 放行 9 报告",
+        out["verdict"] == "approve"
+        and [c["id"] for c in out["checks"]]
+        == [
+            "fix_applied",
+            "change_target",
+            "verification_present",
+            "fix_verified",
+            "evidence_present",
+            "loop_not_exhausted",
+        ],
+        json.dumps({k: out.get(k) for k in ("verdict", "reason_code")}),
     )
 
-    # 工单段落为空 → 第 5 条 fail
-    out = await r.run(
-        "review",
-        mode="run",
+    out = await Runner().run(
+        "reviewer",
+        mode="gate2",
         scenario="default",
-        case_id="case-nosections",
-        input_obj=review_src(
-            case_id="case-nosections",
-            ticket_sections=[{"key": "rca", "content": "   "}, {"key": "impact", "content": "x"}],
+        input_obj=gate2_input(case_id="C-rev-6", fix_verified=False),
+        case_id="C-rev-6",
+    )
+    check(
+        "reviewer/gate2 验证未通过 → rework（回炉 4a，不被夹具改回 approve）",
+        out["verdict"] == "rework"
+        and out["reason_code"] == "fix_not_verified"
+        and bool(out["requested_info"]),
+        json.dumps({k: out.get(k) for k in ("verdict", "reason_code")}),
+    )
+
+    out = await Runner().run(
+        "reviewer",
+        mode="gate2",
+        scenario="gate2_rework",
+        input_obj=gate2_input(case_id="C-rev-7"),
+        case_id="C-rev-7",
+    )
+    check(
+        "reviewer/gate2 夹具可演示 rework（附重跑要求）",
+        out["verdict"] == "rework"
+        and out["reason_code"] == "fix_not_verified"
+        and len(out["requested_info"]) == 2,
+        json.dumps(out["requested_info"], ensure_ascii=False),
+    )
+
+    out = await Runner().run(
+        "reviewer",
+        mode="gate2",
+        scenario="default",
+        input_obj=gate2_input(case_id="C-rev-8", fixed=False, target=""),
+        case_id="C-rev-8",
+    )
+    check(
+        "reviewer/gate2 没有可用修复 → rework(missing_repro)",
+        out["verdict"] == "rework" and out["reason_code"] == "missing_repro",
+        json.dumps({k: out.get(k) for k in ("verdict", "reason_code")}),
+    )
+
+    out = await Runner().run(
+        "reviewer",
+        mode="gate3",
+        scenario="default",
+        input_obj=gate3_input(case_id="C-rev-9"),
+        case_id="C-rev-9",
+    )
+    check(
+        "reviewer/gate3 → 工单齐备，approve 放行 9 报告",
+        out["verdict"] == "approve"
+        and [c["id"] for c in out["checks"]]
+        == [
+            "ticket_status",
+            "ticket_sections",
+            "owner_assigned",
+            "duplicate_consistent",
+            "loop_not_exhausted",
+        ],
+        json.dumps({k: out.get(k) for k in ("verdict", "reason_code")}),
+    )
+
+    out = await Runner().run(
+        "reviewer",
+        mode="gate3",
+        scenario="default",
+        input_obj=gate3_input(case_id="C-rev-10", sections=[{"key": "rca", "content": "驱动缺陷"}]),
+        case_id="C-rev-10",
+    )
+    check(
+        "reviewer/gate3 工单缺 repro/evidence → needs_info（回炉 7b）",
+        out["verdict"] == "needs_info" and out["reason_code"] == "missing_ticket_sections",
+        json.dumps({k: out.get(k) for k in ("verdict", "reason_code")}),
+    )
+
+    out = await Runner().run(
+        "reviewer",
+        mode="gate3",
+        scenario="default",
+        input_obj=gate3_input(case_id="C-rev-11", duplicate_of="OST-9"),
+        case_id="C-rev-11",
+    )
+    check(
+        "reviewer/gate3 重复工单关系不自洽 → needs_info(duplicate_ticket)",
+        out["verdict"] == "needs_info" and out["reason_code"] == "duplicate_ticket",
+        json.dumps({k: out.get(k) for k in ("verdict", "reason_code")}),
+    )
+
+    out = await Runner().run(
+        "reviewer",
+        mode="gate3",
+        scenario="gate3_needs_info",
+        input_obj=gate3_input(case_id="C-rev-12"),
+        case_id="C-rev-12",
+    )
+    check(
+        "reviewer/gate3 夹具可演示 needs_info（补影响面/责任人）",
+        out["verdict"] == "needs_info"
+        and out["reason_code"] == "missing_ticket_sections"
+        and len(out["requested_info"]) == 2,
+        json.dumps(out["requested_info"], ensure_ascii=False),
+    )
+
+    out = await Runner().run(
+        "reviewer",
+        mode="gate3",
+        scenario="default",
+        input_obj={**gate3_input(case_id="C-rev-15"), "loop_seq": 3},
+        case_id="C-rev-15",
+    )
+    check(
+        "reviewer 回炉轮次超上限 → reject(loop_exhausted)",
+        out["verdict"] == "reject"
+        and out["reason_code"] == "loop_exhausted"
+        and "loop_not_exhausted" in [c["id"] for c in out["checks"] if not c["pass"]],
+        json.dumps({k: out.get(k) for k in ("verdict", "reason_code")}),
+    )
+
+    try:
+        await Runner().run(
+            "reviewer",
+            mode="gate4",
+            scenario="default",
+            input_obj=reviewer_input(case_id="C-rev-16"),
+            case_id="C-rev-16",
+        )
+        check("reviewer 非法 gate → Blocked(schema_invalid)", False, "没有抛出")
+    except Blocked as b:
+        check(
+            "reviewer 非法 gate → Blocked(schema_invalid)",
+            b.code == "schema_invalid",
+            f"code={b.code}",
+        )
+
+
+# --------------------------------------------------------------------- Ticketing（create）
+def ticketing_input(
+    *,
+    case_id: str,
+    rca: str = "driver",
+    reproducible: str = "yes",
+    regression: dict | None = None,
+    duplicate_of: str | None = None,
+) -> dict:
+    return {
+        "case_id": case_id,
+        "source": "monitor",
+        "job": "os-staging-test",
+        "build": 1261,
+        "signal": "error",
+        "rca": rca,
+        "component": "driver",
+        "path": "external",
+        "reproduction": {
+            "reproducible": reproducible,
+            "attempts": 2,
+            "matrix": [{"os": "sut-target-os 24.04", "config": "default", "outcome": "fail"}],
+            "new_evidence": [
+                {"kind": "repro_log", "uri": "db://evidence/1", "note": "attempt 1 → fail"}
+            ],
+        },
+        "regression": (
+            regression if regression is not None else {"is_regression": False, "guilty_patch": None}
         ),
-    )
-    check(
-        "review/工单段落空 → 第 5 条 fail → missing_ticket_sections",
-        check_by_id(out, "ticket_sections_nonempty").get("pass") is False
-        and out.get("reason_code") == "missing_ticket_sections",
-        json.dumps({k: out.get(k) for k in ("verdict", "reason_code")}, ensure_ascii=False),
-    )
+        "duplicate_of": duplicate_of,
+    }
 
-    # 矛盾结论 → 第 7 条 fail
+
+async def selfcheck_ticketing() -> None:
+    print("\n=== Ticketing（create）：优先级 / 段落 / 查重 ===")
+    r = Runner()
     out = await r.run(
-        "review",
-        mode="run",
+        "ticketing",
+        mode="create",
         scenario="default",
-        case_id="case-conflict",
-        input_obj=review_src(case_id="case-conflict", signal="none", reproducible="yes"),
+        input_obj=ticketing_input(case_id="C-tk-1"),
+        case_id="C-tk-1",
+    )
+    secs = {s["key"]: s.get("content") for s in out["sections"]}
+    check(
+        "ticketing/default → created + OST 键 + P1/OS-Driver",
+        out["ticket_status"] == "created"
+        and str(out["external_key"]).startswith("OST-")
+        and out["priority"] == "P1"
+        and out["assignee_team"] == "OS-Driver",
+        json.dumps({k: out.get(k) for k in ("ticket_status", "external_key", "priority")}),
     )
     check(
-        "review/signal=none 但有复现结论 → 第 7 条 fail → inconsistent_evidence",
-        check_by_id(out, "signal_repro_consistent").get("pass") is False
-        and out.get("reason_code") == "inconsistent_evidence",
-        json.dumps({k: out.get(k) for k in ("verdict", "reason_code")}, ensure_ascii=False),
+        "ticketing/default 含 rca/repro/regression/evidence 段落且非空",
+        {"rca", "repro", "regression", "evidence"} <= set(secs)
+        and all(str(secs[k] or "").strip() for k in ("rca", "repro", "regression", "evidence")),
+        json.dumps(sorted(secs), ensure_ascii=False),
+    )
+    check(
+        "ticketing/default 写了 ticket_payload 审计证据",
+        "ticket_payload" in kinds(r.db, case_id="C-tk-1", stage="ticketing"),
+        str(kinds(r.db, case_id="C-tk-1", stage="ticketing")),
     )
 
-    # duplicate 场景：第 6 条必须 fail，第二轮仍未澄清 → reject
-    out1 = await r.run(
-        "review",
-        mode="run",
+    out = await Runner().run(
+        "ticketing",
+        mode="create",
+        scenario="default",
+        input_obj=ticketing_input(
+            case_id="C-tk-2",
+            regression={
+                "is_regression": True,
+                "guilty_patch": {"commit": "a1b2c3d", "pr": "PR-1187", "author": "wang.lei"},
+            },
+        ),
+        case_id="C-tk-2",
+    )
+    check(
+        "ticketing 回归 + guilty patch → P1 并关联补丁",
+        out["priority"] == "P1"
+        and out["linked_patches"] == ["a1b2c3d"]
+        and any("a1b2c3d" in str(s.get("content")) for s in out["sections"]),
+        json.dumps({k: out.get(k) for k in ("priority", "linked_patches")}),
+    )
+
+    out = await Runner().run(
+        "ticketing",
+        mode="create",
+        scenario="default",
+        input_obj=ticketing_input(case_id="C-tk-3", reproducible="no"),
+        case_id="C-tk-3",
+    )
+    check(
+        "ticketing 不可复现 → P3",
+        out["priority"] == "P3",
+        json.dumps({"priority": out.get("priority")}),
+    )
+
+    out = await Runner().run(
+        "ticketing",
+        mode="create",
         scenario="duplicate",
-        case_id="case-dup-r",
-        input_obj=review_src(
-            case_id="case-dup-r",
-            ticket_status="linked_duplicate",
-            duplicate_of="OST-4821",
-            loop_seq=1,
-        ),
-    )
-    out2 = await r.run(
-        "review",
-        mode="run",
-        scenario="duplicate",
-        case_id="case-dup-r",
-        input_obj=review_src(
-            case_id="case-dup-r",
-            ticket_status="linked_duplicate",
-            duplicate_of="OST-4821",
-            loop_seq=2,
-        ),
+        input_obj=ticketing_input(case_id="C-tk-4"),
+        case_id="C-tk-4",
     )
     check(
-        "review/duplicate 第 6 条 fail（第 1 轮 needs_info/duplicate_ticket）",
-        check_by_id(out1, "no_duplicate_ticket").get("pass") is False
-        and out1.get("verdict") == "needs_info"
-        and out1.get("reason_code") == "duplicate_ticket",
-        json.dumps({k: out1.get(k) for k in ("verdict", "reason_code")}, ensure_ascii=False),
-    )
-    check(
-        "review/duplicate 第 2 轮 → reject/duplicate_ticket",
-        out2.get("verdict") == "reject" and out2.get("reason_code") == "duplicate_ticket",
-        json.dumps({k: out2.get(k) for k in ("verdict", "reason_code")}, ensure_ascii=False),
+        "ticketing/duplicate → linked_duplicate（关联 OST-2211，不另建单）",
+        out["ticket_status"] == "linked_duplicate"
+        and out["external_key"] is None
+        and out["duplicate_of"] == "OST-2211"
+        and any("关联到已有工单" in str(s.get("content")) for s in out["sections"]),
+        json.dumps({k: out.get(k) for k in ("ticket_status", "duplicate_of")}),
     )
 
-    # 场景夹具：needs_info（第一轮）→ 回炉后 approve
-    out1 = await r.run(
-        "review",
-        mode="run",
-        scenario="needs_info",
-        case_id="case-needinfo",
-        input_obj=review_src(case_id="case-needinfo", loop_seq=1),
-    )
-    out2 = await r.run(
-        "review",
-        mode="run",
-        scenario="needs_info",
-        case_id="case-needinfo",
-        input_obj=review_src(
-            case_id="case-needinfo",
-            loop_seq=2,
-            requested_focus="补充受控重跑记录与 reproducible 结论",
-        ),
+    out = await Runner().run(
+        "ticketing",
+        mode="create",
+        scenario="default",
+        input_obj=ticketing_input(case_id="C-tk-5", duplicate_of="case:8daea705"),
+        case_id="C-tk-5",
     )
     check(
-        "review/needs_info 夹具：第 1 轮 needs_info + requested_info",
-        out1.get("verdict") == "needs_info" and bool(out1.get("requested_info")),
-        json.dumps(
-            {k: out1.get(k) for k in ("verdict", "reason_code", "requested_info")},
-            ensure_ascii=False,
-        ),
-    )
-    check(
-        "review/needs_info 夹具：第 2 轮回炉后按机械预检 approve",
-        out2.get("verdict") == "approve" and out2.get("reason_code") == "ok",
-        json.dumps({k: out2.get(k) for k in ("verdict", "reason_code")}, ensure_ascii=False),
+        "ticketing 继承 Triage 的 duplicate_of → 关联已有工单",
+        out["ticket_status"] == "linked_duplicate"
+        and out["duplicate_of"] == "case:8daea705"
+        and out["audit"]["dedup_source"] == "triage",
+        json.dumps({k: out.get(k) for k in ("ticket_status", "duplicate_of")}),
     )
 
-    # 场景夹具：insufficient → 永远 needs_info；回炉耗尽 → loop_exhausted
-    out1 = await r.run(
-        "review",
-        mode="run",
-        scenario="insufficient",
-        case_id="case-insufficient",
-        input_obj=review_src(case_id="case-insufficient", loop_seq=1),
-    )
-    out2 = await r.run(
-        "review",
-        mode="run",
-        scenario="insufficient",
-        case_id="case-insufficient",
-        input_obj=review_src(case_id="case-insufficient", loop_seq=2),
-    )
-    out3 = await r.run(
-        "review",
-        mode="run",
-        scenario="insufficient",
-        case_id="case-insufficient",
-        input_obj=review_src(case_id="case-insufficient", loop_seq=3),
-    )
+    old_autocreate = cfg.ticket_autocreate
+    cfg.ticket_autocreate = False
+    try:
+        out = await Runner().run(
+            "ticketing",
+            mode="create",
+            scenario="default",
+            input_obj=ticketing_input(case_id="C-tk-6"),
+            case_id="C-tk-6",
+        )
+    finally:
+        cfg.ticket_autocreate = old_autocreate
     check(
-        "review/insufficient 夹具：每一轮都 needs_info/insufficient_evidence",
-        out1.get("verdict") == "needs_info"
-        and out2.get("verdict") == "needs_info"
-        and out1.get("reason_code") == "insufficient_evidence"
-        and out2.get("reason_code") == "insufficient_evidence",
-        json.dumps([out1.get("reason_code"), out2.get("reason_code")]),
-    )
-    check(
-        "review/insufficient 夹具：回炉预算耗尽 → 第 8 条 fail + reason loop_exhausted（编排层据此 blocked）",
-        check_by_id(out3, "loop_not_exhausted").get("pass") is False
-        and out3.get("reason_code") == "loop_exhausted",
-        json.dumps({k: out3.get(k) for k in ("verdict", "reason_code")}, ensure_ascii=False),
-    )
-
-    # reject 夹具
-    out = await r.run(
-        "review",
-        mode="run",
-        scenario="reject",
-        case_id="case-reject",
-        input_obj=review_src(case_id="case-reject"),
-    )
-    check(
-        "review/reject 夹具 → reject/mock_reject",
-        out.get("verdict") == "reject" and out.get("reason_code") == "mock_reject",
-        json.dumps({k: out.get(k) for k in ("verdict", "reason_code")}, ensure_ascii=False),
+        "ticketing TICKET_AUTOCREATE=false → drafted 草稿",
+        out["ticket_status"] == "drafted"
+        and str(out["external_key"]).startswith("DRAFT-")
+        and out["audit"]["autocreate"] is False,
+        json.dumps({k: out.get(k) for k in ("ticket_status", "external_key")}),
     )
 
 
-# --------------------------------------------------------------------- Reporting
-async def selfcheck_reporting() -> None:
-    print("\n=== Reporting：结案报告与日报 ===")
-    db = FakeDB()
-    r = Runner(db)
-    obs = await monitor_promoted_obs(r, "default")
-    case_id = "case-report-1"
-    await db.create_case(
-        case_id=case_id,
-        run_id="R-report",
-        scan_id="scan-report",
-        source="mock-jenkins",
-        job=obs.get("job"),
-        build=obs.get("build"),
-        signal="error",
-        signature=obs.get("signature"),
-        status="closed",
-        workflow_key="s2_full",
-        plan_source="workflow",
-        priority=100,
-        created_at=dt.datetime.now(),
-    )
-    triage_out = await r.run(
-        "triage",
-        mode="full",
-        scenario="driver-crash",
-        case_id=case_id,
-        input_obj=triage_input(obs, case_id),
-    )
-    db.add_stage_run(case_id=case_id, stage="monitor", mode="scan", latency_ms=1400, output={})
-    db.add_stage_run(
-        case_id=case_id, stage="triage", mode="full", latency_ms=2200, output=triage_out
-    )
-    src = triage_input(obs, case_id)
-    src.update(
+# --------------------------------------------------------------------- Reporting（case | daily）
+def seed_case(
+    db: FakeDB,
+    case_id: str,
+    *,
+    path: str = "external",
+    status: str = "reported",
+    created_at: dt.datetime | None = None,
+) -> None:
+    """铺一条完整链路的历史（stage_runs + 一条证据），供 Reporting 出结案报告。"""
+    db.cases[case_id] = {
+        "case_id": case_id,
+        "run_id": f"R-{case_id}",
+        "scan_id": "scan-seed",
+        "source": "mock",
+        "job": "os-staging-test",
+        "build": 1261,
+        "signal": "error",
+        "signature": "driver:crash:deadbeef",
+        "status": status,
+        "workflow_key": "s2_full",
+        "plan_id": f"P-{case_id}",
+        "plan_source": "workflow",
+        "priority": None,
+        "payload": {},
+        "created_at": created_at or dt.datetime.now(),
+    }
+    db.evidence_rows.append(
         {
-            "rca": triage_out["rca"],
-            "signature": triage_out["signature"],
-            "key_frames": triage_out.get("key_frames") or [],
+            "id": len(db.evidence_rows) + 1,
+            "case_id": case_id,
+            "scan_id": "scan-seed",
+            "stage": "reproduction",
+            "kind": "repro_log",
+            "uri": "db://evidence/seed",
+            "meta": {},
+            "excerpt": "attempt 1: amdgpu GPU page fault",
+            "created_at": dt.datetime.now(),
         }
     )
-    repro_out = await r.run(
-        "reproduction", mode="run", scenario="driver-crash", case_id=case_id, input_obj=src
-    )
+    db.add_stage_run(case_id=case_id, stage="monitor", mode="scan", step_id="scan")
     db.add_stage_run(
-        case_id=case_id, stage="reproduction", mode="run", latency_ms=3100, output=repro_out
-    )
-    src2 = dict(src, reproducible=repro_out["reproducible"])
-    ticket_out = await r.run(
-        "ticket", mode="run", scenario="default", case_id=case_id, input_obj=src2
-    )
-    db.add_stage_run(case_id=case_id, stage="ticket", mode="run", latency_ms=900, output=ticket_out)
-    review_in = review_src(
         case_id=case_id,
-        signature=triage_out["signature"],
-        rca=triage_out["rca"],
-        confidence=triage_out["confidence"],
-        key_frames=triage_out.get("key_frames") or [],
-        reproducible=repro_out["reproducible"],
-        ticket_status=ticket_out["ticket_status"],
-        ticket_sections=ticket_out.get("sections") or [],
-        evidence_count=len(r.db.evidence_rows),
-        loop_seq=1,
-    )
-    review_out = await r.run(
-        "review", mode="run", scenario="default", case_id=case_id, input_obj=review_in
+        stage="triage",
+        mode="classify",
+        step_id="t1",
+        output={
+            "case_id": case_id,
+            "rca": "driver",
+            "path": path,
+            "component": "driver",
+            "os_stage": "staging-test",
+            "signature": "driver:crash:deadbeef",
+            "confidence": 0.82,
+            "triage_notes": ["错误簇集中在 driver 侧，判定产品缺陷"],
+        },
     )
     db.add_stage_run(
-        case_id=case_id, stage="review", mode="run", latency_ms=1500, output=review_out
+        case_id=case_id,
+        stage="reviewer",
+        mode="gate1",
+        step_id="g1",
+        output={
+            "case_id": case_id,
+            "gate": "gate1",
+            "verdict": "approve",
+            "decision": path,
+            "reason_code": "ok",
+            "requested_info": [],
+        },
     )
+    if path == "external":
+        db.add_stage_run(
+            case_id=case_id,
+            stage="reproduction",
+            mode="evidence",
+            step_id="e1",
+            output={
+                "case_id": case_id,
+                "mode": "evidence",
+                "reproducible": "yes",
+                "attempts": 2,
+                "matrix": [],
+                "fix_verified": None,
+            },
+        )
+        db.add_stage_run(
+            case_id=case_id,
+            stage="regression",
+            mode="check",
+            step_id="c1",
+            output={
+                "case_id": case_id,
+                "mode": "check",
+                "is_regression": True,
+                "baseline": "staging-pass-2026-11-24",
+                "change_window": "a1b2c3d..f4e5d6a",
+                "bisected": False,
+                "guilty_patch": None,
+            },
+        )
+        db.add_stage_run(
+            case_id=case_id,
+            stage="regression",
+            mode="bisect",
+            step_id="b1",
+            output={
+                "case_id": case_id,
+                "mode": "bisect",
+                "is_regression": True,
+                "bisected": True,
+                "guilty_patch": {
+                    "commit": "a1b2c3d",
+                    "pr": "PR-1187",
+                    "author": "wang.lei",
+                    "confidence": 0.86,
+                    "rationale": "改动引入 smu_ops 未初始化",
+                },
+            },
+        )
+        db.add_stage_run(
+            case_id=case_id,
+            stage="ticketing",
+            mode="create",
+            step_id="k1",
+            output={
+                "case_id": case_id,
+                "backend": "jira",
+                "external_key": "OST-1094",
+                "ticket_status": "created",
+                "priority": "P1",
+                "assignee_team": "OS-Driver",
+                "sections": [],
+            },
+        )
+        db.add_stage_run(
+            case_id=case_id,
+            stage="reviewer",
+            mode="gate3",
+            step_id="g3",
+            output={
+                "case_id": case_id,
+                "gate": "gate3",
+                "verdict": "approve",
+                "reason_code": "ok",
+                "requested_info": [],
+            },
+        )
+    else:
+        db.add_stage_run(
+            case_id=case_id,
+            stage="remediation",
+            mode="fix",
+            step_id="r1",
+            output={
+                "case_id": case_id,
+                "fixed": True,
+                "change_type": "script",
+                "target": "ci/scripts/staging_install.sh",
+                "diff_summary": "清理残留 workspace",
+                "risk": "low",
+                "adopted_from_kb": "KB-FIX-001",
+            },
+        )
+        db.add_stage_run(
+            case_id=case_id,
+            stage="reproduction",
+            mode="verify",
+            step_id="v1",
+            output={
+                "case_id": case_id,
+                "mode": "verify",
+                "reproducible": "yes",
+                "attempts": 3,
+                "matrix": [],
+                "fix_verified": True,
+            },
+        )
+        db.add_stage_run(
+            case_id=case_id,
+            stage="reviewer",
+            mode="gate2",
+            step_id="g2",
+            output={
+                "case_id": case_id,
+                "gate": "gate2",
+                "verdict": "approve",
+                "reason_code": "ok",
+                "requested_info": [],
+            },
+        )
 
+
+async def selfcheck_reporting() -> None:
+    print("\n=== Reporting（case / daily）：结案报告 + 知识库回写 + 日报 ===")
+    db = FakeDB()
+    seed_case(db, "C-report-ext", path="external")
+    r = Runner(db)
     out = await r.run(
         "reporting",
         mode="case",
         scenario="default",
-        case_id=case_id,
-        input_obj={"case_id": case_id, "day": None},
+        input_obj={"case_id": "C-report-ext", "day": None},
+        case_id="C-report-ext",
     )
-    md = out.get("report_md") or ""
+    md = out["report_md"]
     check(
-        "reporting/case 结案报告结构齐全（结论摘要/阶段执行/证据链/未解决项）",
+        "reporting/case（external）报告含摘要/阶段/证据链/未解决项",
         all(
-            s in md
-            for s in ("# Case 结案报告", "## 结论摘要", "## 阶段执行", "## 证据链", "## 未解决项")
+            h in md
+            for h in ("# Case 结案报告", "## 结论摘要", "## 阶段执行", "## 证据链", "## 未解决项")
+        )
+        and "分流：**external**" in md
+        and "guilty patch=a1b2c3d" in md
+        and "闸门 3 approve" in md,
+        md[:400],
+    )
+    metrics = out["metrics"]
+    check(
+        "reporting/case 指标覆盖路径/根因/闸门/回归/工单",
+        (metrics.get("path"), metrics.get("rca"), metrics.get("guilty_patch"))
+        == ("external", "driver", "a1b2c3d")
+        and metrics.get("verdicts", {}).get("gate3") == "approve"
+        and metrics.get("ticket_status") == "created"
+        and int(metrics.get("tat_ms") or 0) > 0,
+        json.dumps(
+            {k: metrics.get(k) for k in ("path", "rca", "guilty_patch")}, ensure_ascii=False
         ),
-        md[:200],
     )
-    m = out.get("metrics") or {}
+    kb_kinds = {e["kind"] for e in out["kb_writes"]}
     check(
-        "reporting/case metrics 完整（tat_ms>0 / evidence_count>0 / rca / verdict）",
-        m.get("tat_ms", 0) > 0
-        and m.get("evidence_count", 0) > 0
-        and m.get("rca") == "driver"
-        and m.get("verdict") == "approve"
-        and m.get("case_id") == case_id,
-        json.dumps(m, ensure_ascii=False)[:400],
+        "reporting/case 的 kb_writes 含 failure/guilty_patch/best_practice 三类",
+        kb_kinds == {"failure", "guilty_patch", "best_practice"}
+        and all(e.get("case_id") == "C-report-ext" for e in out["kb_writes"]),
+        json.dumps(sorted(kb_kinds), ensure_ascii=False),
     )
+    rep_ev = [
+        e
+        for e in db.evidence_rows
+        if e["kind"] == "report_md" and e.get("case_id") == "C-report-ext"
+    ]
     check(
-        "reporting/case 写了 report_md 证据",
-        "report_md" in kinds(r.db, case_id, "reporting"),
-        kinds(r.db, case_id, "reporting"),
-    )
-    check(
-        "reporting/case 输出契约字段（case_id/day/report_md/metrics）",
-        {"case_id", "day", "report_md", "metrics"} <= set(out.keys()) and out.get("day"),
-        json.dumps(sorted(out.keys())),
+        "reporting/case 把报告写进 report_md 证据",
+        bool(rep_ev) and (rep_ev[-1].get("meta") or {}).get("mode") == "case",
+        str(len(rep_ev)),
     )
 
-    # daily：需要至少一份扫描计数与若干 case
-    await db.scan_close(
-        scan_id="scan-report", counts={"observed": 3, "promoted": 1, "suppressed": 2}
-    )
-    await db.create_case(
-        case_id="case-report-2",
-        run_id="R-report2",
-        source="mock-jenkins",
-        job="os-staging-test",
-        build=1290,
-        signal="none",
-        signature=None,
-        status="observed",
-        plan_source="workflow",
-        workflow_key="s1_lite",
-        priority=50,
-        created_at=dt.datetime.now(),
-    )
-    day = dt.date.today().isoformat()
-    out = await r.run(
+    db2 = FakeDB()
+    seed_case(db2, "C-report-int", path="internal", status="remediated")
+    out = await Runner(db2).run(
         "reporting",
-        mode="daily",
+        mode="case",
         scenario="default",
-        case_id=None,
-        input_obj={"case_id": None, "day": day},
+        input_obj={"case_id": "C-report-int"},
+        case_id="C-report-int",
     )
-    md = out.get("report_md") or ""
+    kinds_int = {e["kind"] for e in out["kb_writes"]}
     check(
-        "reporting/daily 使用夹具模板并替换占位符",
-        md.startswith(f"# Staging-CI 日报 {day}")
-        and "{{" not in md
-        and all(s in md for s in ("## 概览", "## 根因分布", "## 未解决项")),
-        md[:160],
+        "reporting/case（internal）回写修复经验（fix）并标注闸门 2",
+        "fix" in kinds_int
+        and "闸门 2 approve" in out["report_md"]
+        and out["metrics"]["path"] == "internal",
+        json.dumps(sorted(kinds_int), ensure_ascii=False),
     )
-    m = out.get("metrics") or {}
-    check(
-        "reporting/daily 指标（cases_total / suppressed / rca_distribution / top_signatures）",
-        m.get("cases_total") == 2
-        and m.get("suppressed") == 2
-        and m.get("scans", 0) >= 1
-        and m.get("rca_distribution", {}).get("driver") == 1
-        and m.get("top_signatures"),
-        json.dumps(m, ensure_ascii=False)[:400],
+
+    try:
+        await Runner().run(
+            "reporting",
+            mode="case",
+            scenario="default",
+            input_obj={"case_id": "C-not-exist"},
+            case_id="C-not-exist",
+        )
+        check("reporting/case 缺 case 记录 → Blocked(schema_invalid)", False, "没有抛出")
+    except Blocked as b:
+        check(
+            "reporting/case 缺 case 记录 → Blocked(schema_invalid)",
+            b.code == "schema_invalid",
+            f"code={b.code}",
+        )
+
+    today = dt.datetime.now().strftime("%Y-%m-%d")
+    db3 = FakeDB()
+    seed_case(db3, "C-day-1", path="external", created_at=dt.datetime.now())
+    seed_case(db3, "C-day-2", path="internal", status="closed", created_at=dt.datetime.now())
+    out = await Runner(db3).run(
+        "reporting", mode="daily", scenario="default", input_obj={"day": today}, case_id=None
     )
-    stored = await db.get_daily_report(day)
+    md = out["report_md"]
     check(
-        "reporting/daily 已落库 daily_reports（report_md + metrics + cases）",
-        bool(stored) and stored.get("report_md") and len(stored.get("cases") or []) == 2,
-        json.dumps(sorted((stored or {}).keys())),
+        "reporting/daily → 日报正文含总览/根因/终态/高频签名",
+        out["day"] == today
+        and out["case_id"] is None
+        and out["kb_writes"] == []
+        and "# Staging-CI 日报" in md
+        and "## 根因分布" in md
+        and "## 终态分布" in md
+        and "## 高频签名" in md,
+        md[:300],
     )
     check(
-        "reporting/daily 的 case_id 为 null（契约允许）",
-        out.get("case_id") is None,
-        str(out.get("case_id")),
+        "reporting/daily 指标统计当日两个 Case",
+        out["metrics"].get("cases_total") == 2
+        and set(out["metrics"].get("cases") or []) == {"C-day-1", "C-day-2"},
+        json.dumps(out["metrics"].get("cases"), ensure_ascii=False),
     )
 
 
 # --------------------------------------------------------------------- Plan 夹具
+def plan_semantics(raw: dict) -> list[str]:
+    """计划语义自检（schema 表达不了的：双分支、回炉方向、mode 归属）。"""
+    issues: list[str] = []
+    steps = list(raw.get("steps") or [])
+    ids = [str(s.get("id")) for s in steps]
+    index = {sid: i for i, sid in enumerate(ids)}
+    if "monitor" in {str(s.get("stage")) for s in steps}:
+        issues.append("计划里不应出现 monitor（由 Scheduler 触发）")
+    for step in steps:
+        sid, stage, mode = str(step.get("id")), str(step.get("stage")), str(step.get("mode"))
+        if stage not in MODE_AUTHORITY:
+            issues.append(f"{sid}: 未知 stage={stage}")
+            continue
+        if mode not in MODE_AUTHORITY[stage]:
+            issues.append(f"{sid}: {stage} 不接受 mode={mode}")
+        for verb, act in (step.get("on") or {}).items():
+            act = act or {}
+            target = act.get("next") or act.get("jump")
+            if not target:
+                continue
+            if target not in index:
+                issues.append(f"{sid}.{verb} → 不存在的 {target}")
+            elif act.get("jump") and index[target] >= index[sid]:
+                issues.append(f"{sid}.{verb} 的回炉目标 {target} 不在更早的步骤")
+    gates = {f"{s.get('stage')}:{s.get('mode')}" for s in steps}
+    if "reviewer:gate1" not in gates:
+        issues.append("缺少闸门 1（reviewer:gate1）")
+    if "reporting:case" not in gates:
+        issues.append("缺少 reporting:case")
+    for step in steps:
+        if (
+            step.get("stage") == "reviewer"
+            and step.get("mode") == "gate1"
+            and not {"internal", "external"} <= set(step.get("on") or {})
+        ):
+            issues.append("闸门 1 必须同时给出 internal / external 两条分支")
+    return issues
+
+
 async def selfcheck_plans() -> None:
-    print("\n=== Plan 夹具：对照 schemas/plan.schema.json ===")
+    print("\n=== Plan 夹具：对照 schemas/plan.schema.json + 双分支/回炉语义 ===")
     import yaml
 
     schema = json.loads((DATA / "schemas" / "plan.schema.json").read_text(encoding="utf-8"))
-    for name, expect_ok in (("warming_ok", True), ("no_repro", True), ("invalid_stage", False)):
+    expect = {
+        "internal_ok": True,
+        "external_ok": True,
+        "invalid_stage": False,
+        "invalid_order": False,
+    }
+    for name, ok in expect.items():
         raw = yaml.safe_load(
             (DATA / "fixtures" / "plans" / f"{name}.yaml").read_text(encoding="utf-8")
         )
         errs = sorted(
             jsonschema.Draft202012Validator(schema).iter_errors(raw), key=lambda e: e.json_path
         )
-        ok = bool(errs) == (not expect_ok)
+        issues = plan_semantics(raw)
         check(
-            f"plans/{name}.yaml {'合法' if expect_ok else '非法（被校验器拒绝）'}",
-            ok,
-            json.dumps([f"{e.json_path}: {e.message}" for e in errs], ensure_ascii=False)[:300],
+            f"plans/{name}.yaml {'合法' if ok else '非法'}（schema {len(errs)} 错 / 语义 {len(issues)} 错）",
+            (not errs and not issues) == ok,
+            json.dumps(
+                [f"{e.json_path}: {e.message}" for e in errs][:2] + issues[:2], ensure_ascii=False
+            )[:300],
         )
-        if expect_ok:
-            stages = [s["stage"] for s in raw.get("steps") or []]
+        if ok:
+            steps = raw["steps"]
+            gates = {f"{s['stage']}:{s['mode']}" for s in steps}
+            loops = [
+                int((a or {}).get("max_loops") or 0)
+                for s in steps
+                for a in (s.get("on") or {}).values()
+            ]
             check(
-                f"plans/{name}.yaml 不含 monitor 步骤且 mode 合法",
-                "monitor" not in stages
-                and all(
-                    s["mode"] in ("full", "classify_only", "run", "case", "daily")
-                    for s in raw["steps"]
-                ),
-                json.dumps(stages),
+                f"plans/{name}.yaml 同时含 internal（fix→verify→gate2）与 "
+                "external（evidence→check→bisect→create→gate3）两支",
+                {
+                    "remediation:fix",
+                    "reproduction:verify",
+                    "reviewer:gate2",
+                    "reproduction:evidence",
+                    "regression:check",
+                    "regression:bisect",
+                    "ticketing:create",
+                    "reviewer:gate3",
+                }
+                <= gates,
+                json.dumps(sorted(gates), ensure_ascii=False),
             )
             check(
-                f"plans/{name}.yaml 的 on 步骤名是字符串（不是 YAML 布尔键）",
-                all(isinstance(k, str) for s in raw["steps"] for k in (s.get("on") or {})),
-                json.dumps([list(s.get("on") or {}) for s in raw["steps"]]),
+                f"plans/{name}.yaml 回炉上限 <= cfg.max_review_loops({cfg.max_review_loops})",
+                max(loops or [0]) <= int(cfg.max_review_loops),
+                str(loops),
             )
 
 
@@ -1484,11 +2082,18 @@ async def selfcheck_alias() -> None:
 async def main() -> int:
     print(f"selfcheck_agents: data={DATA}")
     print(f"interpreter={sys.version.split()[0]}")
+    check(
+        "8 个 Agent 都对上了 stage-contracts 的 mode 归属",
+        set(HANDLERS) == set(MODE_AUTHORITY) and sum(len(m) for m in MODE_AUTHORITY.values()) == 13,
+        json.dumps({k: list(v) for k, v in MODE_AUTHORITY.items()}, ensure_ascii=False),
+    )
     await selfcheck_monitor()
     await selfcheck_triage()
+    await selfcheck_remediation()
     await selfcheck_reproduction()
-    await selfcheck_ticket()
-    await selfcheck_review()
+    await selfcheck_regression()
+    await selfcheck_reviewer()
+    await selfcheck_ticketing()
     await selfcheck_reporting()
     await selfcheck_plans()
     await selfcheck_alias()
@@ -1507,6 +2112,7 @@ async def main() -> int:
         if not any(f.startswith("monitor/") for f in FAILURES)
         else "- Monitor 场景存在偏差"
     )
+    print(f"- 断言总数：{CHECKS[0]}（8 Agent / 13 个 mode，覆盖 12 阶段两分支三闸门）")
     if FAILURES:
         print(f"\n结果：FAIL {len(FAILURES)} 项")
         for f in FAILURES:
@@ -1516,13 +2122,18 @@ async def main() -> int:
     return 0
 
 
-if __name__ == "__main__":
+def cli() -> int:
+    """console script 入口：main 是协程，由这里起事件循环。"""
     try:
-        sys.exit(asyncio.run(main()))
+        return asyncio.run(main())
     except Exception as exc:  # 自检脚本本身出错也要明确失败
         FAILURES.append(f"selfcheck 运行异常: {exc!r}")
         print(f"\nFAIL selfcheck 运行异常 :: {exc!r}")
         import traceback
 
         traceback.print_exc()
-        sys.exit(2)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(cli())

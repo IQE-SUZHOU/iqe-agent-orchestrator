@@ -1,28 +1,70 @@
 key: s2_full
-title: 新失败完整链：分类→复现→工单→复核→案例报告
+title: 完整流水线：分流（闸门 1）→ 内部修复/外部建单 → 复核（闸门 2/3）→ 报告
 enabled: true
 priority: 100
-version: 1
+version: 2
 match:
   signal: error
   job_not_pattern: "llm-plan-demo"
 steps:
   - id: t1
     stage: triage
-    mode: full
-  - id: r1
-    stage: reproduction
-    mode: run
+    mode: classify
+  # ---- 闸门 1：只决定「走哪条路」，不修不建单 ----
+  - id: g1
+    stage: reviewer
+    mode: gate1
     timeout_s: 20
-  - id: k1
-    stage: ticket
-    mode: run
-  - id: v1
-    stage: review
-    mode: run
     "on":
-      approve: { next: p1 }
+      internal: { next: r1, set_status: routed_internal }
+      external: { next: e1, set_status: routed_external }
+      approve: { next: r1 }
       needs_info: { jump: t1, max_loops: 2, set_status: triaged }
+      reject: { end: true, set_status: closed_rejected }
+  # ---- 上行：内部自动化问题（4a 修复 → 5a 验证 → 6a 复核）----
+  - id: r1
+    stage: remediation
+    mode: fix
+    timeout_s: 60
+  - id: v1
+    stage: reproduction
+    mode: verify
+    timeout_s: 60
+  - id: g2
+    stage: reviewer
+    mode: gate2
+    timeout_s: 20
+    "on":
+      approve: { next: p1, set_status: fix_approved }
+      rework: { jump: r1, max_loops: 2, set_status: remediated }
+      reject: { end: true, set_status: closed_rejected }
+  # ---- 下行：外部/非内部问题（4b 取证 → 5b 回归判定 → 6c 定位补丁 → 7b 建单 → 8b 复核）----
+  - id: e1
+    stage: reproduction
+    mode: evidence
+    timeout_s: 60
+  - id: c1
+    stage: regression
+    mode: check
+    timeout_s: 30
+    "on":
+      regression: { next: b1, set_status: regression_checked }
+      not_regression: { next: k1, set_status: reproduced }
+  - id: b1
+    stage: regression
+    mode: bisect
+    timeout_s: 90
+  - id: k1
+    stage: ticketing
+    mode: create
+    timeout_s: 20
+  - id: g3
+    stage: reviewer
+    mode: gate3
+    timeout_s: 20
+    "on":
+      approve: { next: p1, set_status: ticket_approved }
+      needs_info: { jump: k1, max_loops: 2, set_status: ticketed }
       reject: { end: true, set_status: closed_rejected }
   - id: p1
     stage: reporting

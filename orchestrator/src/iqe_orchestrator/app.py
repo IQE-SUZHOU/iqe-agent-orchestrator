@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from iqe_orchestrator.common import bus as bus_mod
 from iqe_orchestrator.common.config import cfg
+from iqe_orchestrator.common.contracts import MODE_AUTHORITY, path_matrix
 from iqe_orchestrator.common.db import DB
 from iqe_orchestrator.common.envelope import make_command, now_iso, ulid
 from iqe_orchestrator.common.logs import counters, log_with, setup_logging
@@ -33,6 +34,21 @@ from .scheduler import Scheduler
 log = logging.getLogger("orchestrator.app")
 UI_DIR = Path(__file__).resolve().parent / "ui"
 
+#: UI/运维面板展示夹具时用的目录（一个 Agent 一个目录，里面按场景分文件）。
+AGENT_FIXTURES = (
+    ("triage", "triage"),
+    ("reviewer", "reviewer"),
+    ("remediation", "remediation"),
+    ("reproduction", "repro"),
+    ("regression", "regression"),
+    ("ticketing", "ticketing"),
+)
+
+
+def _fixture_names(folder: str) -> list[str]:
+    fx = Fixtures()
+    return sorted(p.stem for p in fx.path(folder).glob("*.json")) if fx.exists(folder) else []
+
 
 class ScanRequest(BaseModel):
     scenario: str | None = None
@@ -47,8 +63,8 @@ class DailyRequest(BaseModel):
 
 class InjectRequest(BaseModel):
     kind: str  # bad_command | duplicate_command
-    stage: str = "review"
-    mode: str = "run"
+    stage: str = "triage"
+    mode: str = "classify"
     case_id: str | None = None
     step_id: str = "x1"
     attempt: int = 1
@@ -99,6 +115,7 @@ async def lifespan(app: FastAPI):
             source="file",
             version=wf.version,
         )
+    await RT.db.prune_workflows(sorted(RT.resolver.workflows))
     RT.planner = LLMPlanner()
     RT.store = PlanStore()
     RT.ckpt_pool = AsyncConnectionPool(
@@ -204,18 +221,8 @@ async def api_scenarios():
     )
     return {
         "feed_scenarios": names,
-        "agent_scenarios": {
-            "triage": ["default", "unknown_low_confidence"],
-            "reproduction": [
-                "default",
-                "flaky",
-                "not_reproducible",
-                "blocked_no_machine",
-                "timeout",
-            ],
-            "ticket": ["default", "duplicate"],
-            "review": ["default", "needs_info", "reject", "insufficient"],
-        },
+        "agent_scenarios": {stage: _fixture_names(folder) for stage, folder in AGENT_FIXTURES},
+        "plans": _fixture_names("plans"),
         "note": "source_unavailable 场景故意没有夹具文件，用于验证 Monitor 的 blocked 路径",
     }
 
@@ -315,13 +322,8 @@ async def api_workflows():
     return {
         "items": await RT.db.list_workflows(),
         "registry_dir": cfg.workflows_dir,
-        "mode_rules": {
-            "triage": ["full", "classify_only"],
-            "reproduction": ["run"],
-            "ticket": ["run"],
-            "review": ["run"],
-            "reporting": ["case", "daily"],
-        },
+        "mode_rules": {stage: list(modes) for stage, modes in MODE_AUTHORITY.items()},
+        "path_matrix": path_matrix(),
     }
 
 
@@ -347,13 +349,21 @@ async def api_stats():
             " group by 1,2 order by 1"
         )
         tickets = await conn.fetch("select ticket_status, count(*) n from tickets group by 1")
-        reviews = await conn.fetch("select verdict, count(*) n from reviews group by 1")
+        reviews = await conn.fetch("select gate, verdict, count(*) n from reviews group by 1,2")
         plans = await conn.fetch("select source, degraded, count(*) n from plans group by 1,2")
+        fixes = await conn.fetch("select change_type, count(*) n from remediations group by 1")
+        regressions = await conn.fetch(
+            "select mode, is_regression, count(*) n from regressions group by 1,2"
+        )
+        kb = await conn.fetch("select kind, count(*) n from kb_entries group by 1")
     return {
         "cases": [dict(r) for r in cases],
         "stages": [dict(r) for r in stages],
         "tickets": [dict(r) for r in tickets],
         "reviews": [dict(r) for r in reviews],
+        "remediations": [dict(r) for r in fixes],
+        "regressions": [dict(r) for r in regressions],
+        "kb_entries": [dict(r) for r in kb],
         "plans": [dict(r) for r in plans],
         "counters": counters.render(),
     }
@@ -380,7 +390,7 @@ async def api_inject(req: InjectRequest):
     }
     env = make_command(
         stage=req.stage,
-        action="run",
+        action=payload["mode"],
         case_id=case_id,
         run_id=f"inject-{ulid()[:8]}",
         step_id=req.step_id,
@@ -461,8 +471,23 @@ async def ui_case(request: Request, case_id: str):
         ]
         reviews = [
             dict(r)
+            for r in await conn.fetch("select * from reviews where case_id=$1 order by id", case_id)
+        ]
+        fixes = [
+            dict(r)
+            for r in await conn.fetch("select * from remediations where case_id=$1", case_id)
+        ]
+        vers = [
+            dict(r)
+            for r in await conn.fetch("select * from verifications where case_id=$1", case_id)
+        ]
+        regs = [
+            dict(r) for r in await conn.fetch("select * from regressions where case_id=$1", case_id)
+        ]
+        kb = [
+            dict(r)
             for r in await conn.fetch(
-                "select * from reviews where case_id=$1 order by loop_seq", case_id
+                "select * from kb_entries where case_id=$1 order by id desc", case_id
             )
         ]
     plan_yaml = RT.store.read(case_id, plan["plan_id"]) if plan else None
@@ -481,6 +506,10 @@ async def ui_case(request: Request, case_id: str):
             "evidence": ev,
             "tickets": tickets,
             "reviews": reviews,
+            "fixes": fixes,
+            "vers": vers,
+            "regs": regs,
+            "kb": kb,
             "steps": steps,
             "step_status": step_status,
             "attempts": attempts,

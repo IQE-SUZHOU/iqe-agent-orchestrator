@@ -70,13 +70,29 @@
 
     <h2>复核结论</h2>
     {% for rv in reviews %}
-    <div class="evi"><b>第 {{ rv.loop_seq }} 轮：{{ rv.verdict }}</b>
-      <span class="muted small">{{ rv.reason_code }}</span>
+    <div class="evi"><b>{{ rv.gate or '复核' }} · {{ rv.verdict }}</b>
+      <span class="muted small">{{ rv.reason_code }} · 回炉计数 {{ rv.loop_seq }}</span>
       {% if rv.requested_info %}<div class="muted small">要求补充：{{ rv.requested_info|join('；') }}</div>{% endif %}
       <div class="small">{% for c in rv.checks %}<span class="tag {{ 't-closed' if c.pass else 't-blocked' }}">{{ c.id }}.{{ c.name }}</span> {% endfor %}</div>
     </div>
     {% endfor %}
     {% if not reviews %}<div class="muted small">无复核记录</div>{% endif %}
+
+    <h2>修复 / 验证 / 回归</h2>
+    {% for fx in fixes %}
+    <div class="evi"><b>4a 修复 · {{ fx.change_type }}</b>（{{ fx.risk }}）
+      <div class="small">{{ fx.target }} · {{ fx.diff_summary }}</div>
+      <div class="muted small">work_item={{ fx.work_item_key or '-' }} · fixed={{ fx.fixed }}</div></div>
+    {% endfor %}
+    {% for v in vers %}
+    <div class="evi"><b>{{ '5a 验证' if v.mode == 'verify' else '4b 取证' }}</b>
+      · reproducible={{ v.reproducible }}{% if v.fix_verified is not none %} · fix_verified={{ v.fix_verified }}{% endif %}</div>
+    {% endfor %}
+    {% for g in regs %}
+    <div class="evi"><b>{{ '5b 回归判定' if g.mode == 'check' else '6c 二分定位' }}</b>
+      · is_regression={{ g.is_regression }} · guilty={{ g.guilty_commit or '-' }}</div>
+    {% endfor %}
+    {% if not fixes and not vers and not regs %}<div class="muted small">无修复/验证/回归记录</div>{% endif %}
 
     <h2>工单</h2>
     {% for tk in tickets %}
@@ -84,6 +100,14 @@
       <div class="muted small">{{ tk.backend }} · {{ tk.url or '' }}{% if tk.duplicate_of %} · 重复于 {{ tk.duplicate_of }}{% endif %}</div></div>
     {% endfor %}
     {% if not tickets %}<div class="muted small">无工单</div>{% endif %}
+
+    <h2>知识库回写</h2>
+    {% for k in kb %}
+    <div class="evi"><b>{{ k.kind }} · {{ k.component }}</b>
+      <div class="small">{{ k.summary }}</div>
+      <div class="muted small">signature={{ k.signature or '-' }}</div></div>
+    {% endfor %}
+    {% if not kb %}<div class="muted small">未回写</div>{% endif %}
   </div>
 
   <div>

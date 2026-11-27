@@ -1,0 +1,11 @@
+{
+  "fixed": true,
+  "change_type": "script",
+  "target": "ci/scripts/staging_install.sh",
+  "diff_summary": "在安装步骤前清理残留 workspace 并重装依赖；失败时回退到上一版脚本",
+  "work_item_key": "ADO-4821",
+  "risk": "low",
+  "notes": [
+    "修复来源：知识库 KB-FIX-001（同类问题曾以相同方式修复）"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "gate2": {
+    "verdict": "rework",
+    "reason_code": "fix_not_verified",
+    "requested_info": [
+      "补一次带修复的完整重跑",
+      "附修复前后的 dmesg 对比"
+    ],
+    "notes": "验证阶段没有给出修复有效的证据"
+  }
+}

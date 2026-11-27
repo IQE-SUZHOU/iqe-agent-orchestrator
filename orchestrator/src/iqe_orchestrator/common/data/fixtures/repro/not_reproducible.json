@@ -1,23 +1,34 @@
 {
-  "reproducible": "no",
-  "attempts": 2,
-  "blocked_reason": "干净环境两次均通过",
-  "matrix": [
-    {
-      "os": "sut-target-os 24.04",
-      "config": "clean",
-      "outcome": "pass"
-    },
-    {
-      "os": "sut-target-os 24.04",
-      "config": "clean",
-      "outcome": "pass"
-    }
-  ],
-  "steps_summary": [
-    "重装干净系统镜像",
-    "同参重建两次",
-    "两次均通过，未观测到原错误簇"
-  ],
-  "log_excerpt": "repro attempt 1: 全部用例通过\nrepro attempt 2: 全部用例通过，无错误簇"
+  "evidence": {
+    "reproducible": "no",
+    "attempts": 2,
+    "blocked_reason": "干净环境两次均通过",
+    "matrix": [
+      {
+        "os": "sut-target-os 24.04",
+        "config": "clean",
+        "outcome": "pass"
+      },
+      {
+        "os": "sut-target-os 24.04",
+        "config": "clean",
+        "outcome": "pass"
+      }
+    ],
+    "steps_summary": [
+      "重装干净系统镜像",
+      "同参重建两次",
+      "两次均通过，未观测到原错误簇"
+    ],
+    "log_excerpt": "repro attempt 1: 全部用例通过\nrepro attempt 2: 全部用例通过，无错误簇"
+  },
+  "verify": {
+    "reproducible": "no",
+    "fix_verified": false,
+    "attempts": 1,
+    "steps_summary": [
+      "原始失败不可复现，无法验证修复有效性"
+    ],
+    "log_excerpt": "verify: 无可复现失败，修复有效性无法评估"
+  }
 }

@@ -1,0 +1,12 @@
+{
+  "note": "闸门 1 每轮都判证据不足 → 回炉耗尽后 reject(loop_exhausted) 结案",
+  "gate1": {
+    "verdict": "needs_info",
+    "reason_code": "insufficient_evidence",
+    "requested_info": [
+      "附完整的失败段日志与看护程序重启记录",
+      "给出同签名族最近 3 次构建号，用于判断是否历史问题"
+    ],
+    "notes": "证据始终不齐，无法判定 internal / external"
+  }
+}

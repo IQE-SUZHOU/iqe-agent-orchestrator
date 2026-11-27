@@ -1,8 +1,0 @@
-{
-  "quality_weights": {
-    "evidence": 0.4,
-    "repro": 0.3,
-    "consistency": 0.3
-  },
-  "notes": "Mock 复核说明"
-}

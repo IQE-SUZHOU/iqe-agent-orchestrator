@@ -1,0 +1,37 @@
+{
+  "backend": "jira",
+  "project_key": "OST",
+  "sections": [
+    {
+      "key": "rca",
+      "title": "根因结论"
+    },
+    {
+      "key": "repro",
+      "title": "复现结论与矩阵"
+    },
+    {
+      "key": "regression",
+      "title": "回归判定与 guilty patch"
+    },
+    {
+      "key": "evidence",
+      "title": "证据清单"
+    },
+    {
+      "key": "impact",
+      "title": "影响面"
+    },
+    {
+      "key": "next_steps",
+      "title": "建议下一步"
+    }
+  ],
+  "assignee_map": {
+    "driver": "OS-Driver",
+    "test": "OS-QA",
+    "environment": "OS-Infra",
+    "infrastructure": "OS-Infra",
+    "unknown": "OS-Triage"
+  }
+}

@@ -27,6 +27,14 @@ async def trigger_daily(gw: BusGateway, db, *, day: str | None = None) -> dict:
         case_id=None,
         timeout_s=60,
     )
+    if res.status == "ok" and res.output:
+        metrics = res.output.get("metrics") or {}
+        await db.save_daily_report(
+            day=res.output.get("day") or day,
+            report_md=res.output.get("report_md") or "",
+            metrics=metrics,
+            cases=metrics.get("cases") or [],
+        )
     log_with(log, "info", "daily_report_dispatched", day=day, status=res.status, key=res.key)
     return {
         "day": day,

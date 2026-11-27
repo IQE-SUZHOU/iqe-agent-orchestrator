@@ -1,0 +1,13 @@
+{
+  "note": "闸门 1 第一轮要求补充证据 → 编排层 jump 回 2 重新分诊；第二轮放行",
+  "gate1": {
+    "verdict": "needs_info",
+    "reason_code": "insufficient_evidence",
+    "first_loop_only": true,
+    "requested_info": [
+      "补一次失败 job 的完整 console 日志（含 [stage: kernel-mode-suite] 段）",
+      "确认 Oops 前后的 dmesg 尾部与复现次数"
+    ],
+    "notes": "只有一行错误摘要与结论，证据不足以支撑分流"
+  }
+}

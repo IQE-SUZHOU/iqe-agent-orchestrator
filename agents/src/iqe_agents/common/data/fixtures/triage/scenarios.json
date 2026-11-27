@@ -1,9 +1,27 @@
 {
+  "internal_script_fix": {
+    "force_rca": "infrastructure",
+    "force_path": "internal",
+    "force_component": "ci-infra",
+    "confidence": 0.88,
+    "notes": [
+      "Jenkins 侧脚本缺陷（Mock 剧本指定为内部自动化问题）"
+    ]
+  },
+  "external_driver_crash": {
+    "force_rca": "driver",
+    "force_path": "external",
+    "force_component": "driver",
+    "confidence": 0.82,
+    "notes": [
+      "amdgpu 页错误，判定为产品侧缺陷"
+    ]
+  },
   "unknown_low_confidence": {
     "force_rca": "unknown",
     "confidence": 0.3,
     "notes": [
-      "日志被截断，无法定位失败阶段"
+      "日志被截断，无法定位失败阶段；闸门 1 应打回重分诊"
     ]
   }
 }

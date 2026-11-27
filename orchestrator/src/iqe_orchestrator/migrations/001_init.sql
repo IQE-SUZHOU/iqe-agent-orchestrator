@@ -153,3 +153,53 @@ create table if not exists dlq (
 );
 
 -- LangGraph checkpoint 表由 AsyncPostgresSaver.setup() 自动创建（langgraph_ai_*）
+
+-- ---------------------------------------------------------------- 12 步流水线（4a / 5a / 5b / 6c / 闸门）
+-- reviews 增加 gate 列：同一 Case 会依次过 gate1 / gate2 / gate3。
+alter table reviews add column if not exists gate text;
+
+create table if not exists remediations (
+  case_id      text primary key,
+  change_type  text,
+  target       text,
+  fixed        boolean not null default false,
+  work_item_key text,
+  risk         text,
+  diff_summary text,
+  payload      jsonb not null default '{}'::jsonb,
+  created_at   timestamptz not null default now()
+);
+
+create table if not exists verifications (
+  case_id       text not null,
+  mode          text not null,          -- evidence(4b) | verify(5a)
+  reproducible  text,
+  fix_verified  boolean,
+  attempts      integer not null default 0,
+  payload       jsonb not null default '{}'::jsonb,
+  created_at    timestamptz not null default now(),
+  primary key (case_id, mode)
+);
+
+create table if not exists regressions (
+  case_id      text not null,
+  mode         text not null,           -- check(5b) | bisect(6c)
+  is_regression boolean,
+  guilty_commit text,
+  guilty_pr    text,
+  confidence   numeric,
+  payload      jsonb not null default '{}'::jsonb,
+  created_at   timestamptz not null default now(),
+  primary key (case_id, mode)
+);
+
+create table if not exists kb_entries (
+  id           bigserial primary key,
+  kind         text not null,
+  component    text not null,
+  signature    text,
+  summary      text not null,
+  case_id      text,
+  created_at   timestamptz not null default now()
+);
+create index if not exists idx_kb_entries_lookup on kb_entries(component, signature);

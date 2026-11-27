@@ -1,7 +1,8 @@
 """Postgres 访问层（复用集群 infra-database/postgres）。
 
 写权分工（实现期收敛，避免双写竞态）：
-- 编排层拥有 cases / scans / stage_runs / plans / workflows / daily_reports / reviews / tickets；
+- 编排层拥有 cases / scans / stage_runs / plans / workflows / daily_reports / reviews /
+  tickets / remediations / verifications / regressions / kb_entries；
 - Agent 只写 evidence 与 msg_dedup（幂等层 1）。
 """
 
@@ -21,7 +22,16 @@ log = logging.getLogger("ci_triage.common.db")
 
 SCHEMA_FILE = Path(__file__).resolve().parent.parent / "migrations" / "001_init.sql"
 
-STAGES = ("monitor", "triage", "reproduction", "ticket", "review", "reporting")
+STAGES = (
+    "monitor",
+    "triage",
+    "reviewer",
+    "remediation",
+    "reproduction",
+    "regression",
+    "ticketing",
+    "reporting",
+)
 
 
 def _as_date(day: str | date) -> date:
@@ -275,6 +285,26 @@ class DB:
             )
         return [dict(r) for r in rows]
 
+    async def stage_outputs(self, case_id: str) -> dict[str, list[dict]]:
+        """按 stage 聚合本 Case 所有成功的 step 输出（同一 stage 可能执行多次，如 reviewer 三闸门）。"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "select stage, mode, step_id, attempt, output from stage_runs "
+                "where case_id=$1 and status='done' order by id",
+                case_id,
+            )
+        out: dict[str, list[dict]] = {}
+        for r in rows:
+            out.setdefault(r["stage"], []).append(
+                {
+                    "mode": r["mode"],
+                    "step_id": r["step_id"],
+                    "attempt": r["attempt"],
+                    "output": r["output"] or {},
+                }
+            )
+        return out
+
     async def get_stage_output(self, case_id: str, stage: str) -> dict | None:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -362,6 +392,17 @@ class DB:
                 version,
             )
 
+    async def prune_workflows(self, keep: list[str]) -> int:
+        """注册表镜像：删掉 YAML 里已不存在的旧行（工作流改名/下线的清理）。"""
+        async with self.pool.acquire() as conn:
+            res = await conn.execute(
+                "delete from workflows where source='file' and not (key = any($1::text[]))", keep
+            )
+        try:
+            return int(str(res).split()[-1])
+        except (ValueError, IndexError):
+            return 0
+
     async def list_workflows(self) -> list[dict]:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("select * from workflows order by key")
@@ -410,17 +451,21 @@ class DB:
                 output.get("url"),
                 output.get("ticket_status"),
                 output.get("duplicate_of"),
-                output.get("ticket_priority"),
+                output.get("priority") or output.get("ticket_priority"),
                 output.get("assignee_team"),
                 json.dumps(output, ensure_ascii=False),
             )
 
-    async def save_review(self, *, case_id: str, output: dict, loop_seq: int) -> None:
+    async def save_review(
+        self, *, case_id: str, output: dict, loop_seq: int, gate: str | None = None
+    ) -> None:
         async with self.pool.acquire() as conn:
             await conn.execute(
-                """insert into reviews(case_id, verdict, reason_code, requested_info, checks, quality, loop_seq)
-                   values($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7)""",
+                """insert into reviews(case_id, gate, verdict, reason_code, requested_info,
+                                       checks, quality, loop_seq)
+                   values($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8)""",
                 case_id,
+                gate or output.get("gate"),
                 output.get("verdict"),
                 output.get("reason_code"),
                 json.dumps(output.get("requested_info", []), ensure_ascii=False),
@@ -428,6 +473,87 @@ class DB:
                 json.dumps(output.get("quality_scores", {}), ensure_ascii=False),
                 loop_seq,
             )
+
+    # ---------- 4a 修复 / 5a·4b 复现 / 5b·6c 回归 / 知识库回写 ----------
+    async def save_remediation(self, *, case_id: str, output: dict) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """insert into remediations(case_id, change_type, target, fixed, work_item_key,
+                                            risk, diff_summary, payload)
+                   values($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+                   on conflict (case_id) do update set change_type=$2, target=$3, fixed=$4,
+                     work_item_key=$5, risk=$6, diff_summary=$7, payload=$8::jsonb,
+                     created_at=now()""",
+                case_id,
+                output.get("change_type"),
+                output.get("target"),
+                bool(output.get("fixed")),
+                output.get("work_item_key"),
+                output.get("risk"),
+                output.get("diff_summary"),
+                json.dumps(output, ensure_ascii=False),
+            )
+
+    async def save_verification(self, *, case_id: str, output: dict) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """insert into verifications(case_id, mode, reproducible, fix_verified, attempts, payload)
+                   values($1,$2,$3,$4,$5,$6::jsonb)
+                   on conflict (case_id, mode) do update set reproducible=$3, fix_verified=$4,
+                     attempts=$5, payload=$6::jsonb, created_at=now()""",
+                case_id,
+                output.get("mode") or "evidence",
+                output.get("reproducible"),
+                output.get("fix_verified"),
+                int(output.get("attempts") or 0),
+                json.dumps(output, ensure_ascii=False),
+            )
+
+    async def save_regression(self, *, case_id: str, output: dict) -> None:
+        patch = output.get("guilty_patch") or {}
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """insert into regressions(case_id, mode, is_regression, guilty_commit, guilty_pr,
+                                           confidence, payload)
+                   values($1,$2,$3,$4,$5,$6,$7::jsonb)
+                   on conflict (case_id, mode) do update set is_regression=$3, guilty_commit=$4,
+                     guilty_pr=$5, confidence=$6, payload=$7::jsonb, created_at=now()""",
+                case_id,
+                output.get("mode") or "check",
+                output.get("is_regression"),
+                patch.get("commit"),
+                patch.get("pr"),
+                patch.get("confidence"),
+                json.dumps(output, ensure_ascii=False),
+            )
+
+    async def kb_write(self, entry: dict) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """insert into kb_entries(kind, component, signature, summary, case_id)
+                   values($1,$2,$3,$4,$5)""",
+                entry.get("kind") or "failure",
+                entry.get("component") or "unknown",
+                entry.get("signature"),
+                str(entry.get("summary") or "")[:500],
+                entry.get("case_id"),
+            )
+
+    async def kb_search(
+        self, *, component: str | None = None, signature: str | None = None, limit: int = 5
+    ) -> list[dict]:
+        family = (signature or "").split(":")[0]
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """select * from kb_entries
+                   where ($1::text is null or component=$1)
+                      or ($2::text is not null and signature like $2 || '%')
+                   order by id desc limit $3""",
+                component,
+                family or None,
+                limit,
+            )
+        return [dict(r) for r in rows]
 
     async def save_daily_report(
         self, *, day: str, report_md: str, metrics: dict, cases: list[dict]

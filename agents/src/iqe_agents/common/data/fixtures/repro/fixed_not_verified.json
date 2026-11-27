@@ -1,0 +1,46 @@
+{
+  "evidence": {
+    "reproducible": "yes",
+    "attempts": 2,
+    "matrix": [
+      {
+        "os": "sut-target-os 24.04",
+        "config": "default",
+        "outcome": "fail"
+      }
+    ],
+    "steps_summary": [
+      "同参重建两次",
+      "错误簇一致"
+    ],
+    "failing_tests": [
+      "kernel-mode/queue_reinit"
+    ],
+    "log_excerpt": "repro: 两次均复现 queue.c smu_ops 错误"
+  },
+  "verify": {
+    "reproducible": "yes",
+    "fix_verified": false,
+    "attempts": 2,
+    "matrix": [
+      {
+        "os": "sut-target-os 24.04",
+        "config": "patched",
+        "outcome": "fail"
+      },
+      {
+        "os": "sut-target-os 24.04",
+        "config": "patched",
+        "outcome": "fail"
+      }
+    ],
+    "steps_summary": [
+      "应用修复后重跑两次",
+      "原错误簇仍出现，修复无效"
+    ],
+    "failing_tests": [
+      "kernel-mode/queue_reinit"
+    ],
+    "log_excerpt": "verify attempt 1: 仍失败\nverify attempt 2: 仍失败（同签名）"
+  }
+}

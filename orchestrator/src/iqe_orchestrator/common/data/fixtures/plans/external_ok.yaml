@@ -1,0 +1,48 @@
+plan_id: "01JB9ZK3Q6W7X8Y9Z0A1B2C3D6"
+version: 1
+source: llm
+workflow_key: null
+degraded: false
+created_at: "2026-11-25T10:05:00Z"
+scope: case
+signal: error
+rationale: "产品侧缺陷疑似：取证→回归→建单→复核，修复留待产品组"
+model: "mock-planner"
+confidence: 0.71
+steps:
+  - {id: t1, stage: triage, mode: classify}
+  - id: g1
+    stage: reviewer
+    mode: gate1
+    "on":
+      internal: {next: r1, set_status: routed_internal}
+      external: {next: e1, set_status: routed_external}
+      needs_info: {jump: t1, max_loops: 2, set_status: triaged}
+      reject: {end: true, set_status: closed_rejected}
+  - {id: r1, stage: remediation, mode: fix}
+  - {id: v1, stage: reproduction, mode: verify}
+  - id: g2
+    stage: reviewer
+    mode: gate2
+    "on":
+      approve: {next: p1, set_status: fix_approved}
+      rework: {jump: r1, max_loops: 2, set_status: remediated}
+      reject: {end: true, set_status: closed_rejected}
+  - {id: e1, stage: reproduction, mode: evidence}
+  - id: c1
+    stage: regression
+    mode: check
+    "on":
+      regression: {next: b1, set_status: regression_checked}
+      not_regression: {next: k1, set_status: reproduced}
+  - {id: b1, stage: regression, mode: bisect}
+  - {id: k1, stage: ticketing, mode: create}
+  - id: g3
+    stage: reviewer
+    mode: gate3
+    "on":
+      approve: {next: p1, set_status: ticket_approved}
+      needs_info: {jump: k1, max_loops: 2, set_status: ticketed}
+      reject: {end: true, set_status: closed_rejected}
+  - {id: p1, stage: reporting, mode: case}
+validator: "plan-validator/v1"

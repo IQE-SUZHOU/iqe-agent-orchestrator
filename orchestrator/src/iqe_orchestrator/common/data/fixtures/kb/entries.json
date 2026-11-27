@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "KB-ISSUE-001",
+      "kind": "failure",
+      "component": "driver",
+      "signature_family": "driver",
+      "summary": "amdgpu 页错误在低显存机型上族内复发，历史上与 6.8 内核补丁相关",
+      "confidence": 0.8
+    },
+    {
+      "id": "KB-FIX-001",
+      "kind": "fix",
+      "component": "ci-infra",
+      "signature_family": "ci-infra",
+      "summary": "Jenkins 工作区残留导致 executor died：清理 workspace 并重试即可",
+      "confidence": 0.9
+    },
+    {
+      "id": "KB-FIX-002",
+      "kind": "fix",
+      "component": "toolchain",
+      "signature_family": "toolchain",
+      "summary": "cc1plus 编译失败：补 -march 兼容参数或固定 toolchain 版本",
+      "confidence": 0.7
+    },
+    {
+      "id": "KB-PATCH-001",
+      "kind": "guilty_patch",
+      "component": "driver",
+      "signature_family": "driver",
+      "summary": "历史 guilty patch：queue.c 的 smu_ops 未初始化（commit 4f2c1ab）",
+      "confidence": 0.86
+    },
+    {
+      "id": "KB-NOISE-001",
+      "kind": "noise",
+      "component": "apt-repo",
+      "signature_family": "apt-repo",
+      "summary": "构建机外网代理抖动，apt 索引失败与代码无关",
+      "confidence": 0.92
+    },
+    {
+      "id": "KB-BEST-001",
+      "kind": "best_practice",
+      "component": "test",
+      "signature_family": "test",
+      "summary": "断言失败先比对基线运行，再在受控环境复现，避免误判 flaky",
+      "confidence": 0.75
+    }
+  ]
+}

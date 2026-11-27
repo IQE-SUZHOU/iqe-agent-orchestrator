@@ -1,7 +1,7 @@
 """总线封装（RabbitMQ / aio_pika）：拓扑声明、发布（publisher confirm）、消费。
 
-拓扑与 design/02 一致：exchange ci.cmd|ci.result|ci.event|ci.dlx；
-队列 q.agent.<stage> / q.orch.results / q.orch.events / q.audit.* / q.dlq。
+拓扑与 docs/architecture/02 一致：exchange ci.cmd|ci.result|ci.event|ci.dlx；
+队列 q.agent.<stage>（8 个）/ q.orch.results / q.orch.events / q.audit.* / q.dlq。
 """
 
 from __future__ import annotations
@@ -23,15 +23,19 @@ RESULT_EXCHANGE = "ci.result"
 EVENT_EXCHANGE = "ci.event"
 DLX_EXCHANGE = "ci.dlx"
 
-#: stage -> (queue, binding key, prefetch)
+#: stage -> (queue, binding key, prefetch)。绑定键统一用 ``#``：一个 Agent 有多个 mode
+#: （reviewer 三道闸门、reproduction 取证/验证、regression 判定/二分），
+#: 由 payload.mode 决定走哪段剧本，交换机层不再为每个 mode 建队列。
 AGENT_QUEUES: dict[str, tuple[str, str, int]] = {
-    "monitor": ("q.agent.monitor", "ci.cmd.monitor.scan", 1),
+    "monitor": ("q.agent.monitor", "ci.cmd.monitor.#", 1),
     # prefetch = 该 Agent 的并发度：aio-pika 会为每条消息起一个 handler 协程，
     # prefetch>1 时一个慢任务（例如 reproduction 的 45s 剧本）不会把队列里其他 case 卡住。
-    "triage": ("q.agent.triage", "ci.cmd.triage.run", 4),
-    "reproduction": ("q.agent.reproduction", "ci.cmd.reproduction.run", 4),
-    "ticket": ("q.agent.ticket", "ci.cmd.ticket.run", 2),
-    "review": ("q.agent.review", "ci.cmd.review.run", 4),
+    "triage": ("q.agent.triage", "ci.cmd.triage.#", 4),
+    "reviewer": ("q.agent.reviewer", "ci.cmd.reviewer.#", 4),
+    "remediation": ("q.agent.remediation", "ci.cmd.remediation.#", 2),
+    "reproduction": ("q.agent.reproduction", "ci.cmd.reproduction.#", 4),
+    "regression": ("q.agent.regression", "ci.cmd.regression.#", 2),
+    "ticketing": ("q.agent.ticketing", "ci.cmd.ticketing.#", 2),
     "reporting": ("q.agent.reporting", "ci.cmd.reporting.#", 2),
 }
 

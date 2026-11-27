@@ -1,0 +1,8 @@
+{
+  "gate1": {
+    "verdict": "approve",
+    "decision": "internal",
+    "reason_code": "ok",
+    "notes": "内部自动化问题，走修复路径（修复 → 验证 → 复核）"
+  }
+}

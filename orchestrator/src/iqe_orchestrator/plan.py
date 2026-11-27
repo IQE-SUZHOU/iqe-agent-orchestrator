@@ -1,11 +1,13 @@
 """计划层：Workflow Registry（预定义）→ 未命中则 LLMPlanner 兜底；两者同契约、同一校验器。
 
-安全网：LLM 失败/非法 → degraded 内置计划（signal=error → s2_full；signal=none → s1_lite）；
-PLAN_MODE=strict → 不调用 LLM，未命中直接 degraded。
+图中的 12 个阶段由 8 个 Agent 的 mode 承载（见 common/contracts.py），计划只编排 step：
+- ``next``：前向跳转，用来表达闸门 1 的 internal / external 双分支、非回归跳过 6c；
+- ``jump``：后向回炉，只能指回更早的 step（gate2 rework→4a、gate3 needs_info→7b）。
 """
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -16,32 +18,51 @@ from pathlib import Path
 import yaml
 
 from iqe_orchestrator.common.config import cfg
+from iqe_orchestrator.common.contracts import MODE_AUTHORITY
 from iqe_orchestrator.common.envelope import now_iso, ulid, validate
 
 log = logging.getLogger("orchestrator.plan")
 
-STAGE_MODES = {
-    "triage": {"full", "classify_only"},
-    "reproduction": {"run"},
-    "ticket": {"run"},
-    "review": {"run"},
-    "reporting": {"case", "daily"},
+#: 计划里允许出现的 stage：monitor 只由 Scheduler 触发，不进计划。
+STAGE_MODES: dict[str, set[str]] = {
+    stage: set(modes) for stage, modes in MODE_AUTHORITY.items() if stage != "monitor"
 }
 ALLOWED_STAGES = set(STAGE_MODES)
 STATUS_ENUM = {
     "created",
     "triaged",
+    "routed_internal",
+    "routed_external",
+    "remediated",
+    "fix_verified",
+    "fix_approved",
     "reproduced",
+    "regression_checked",
+    "bisected",
     "ticketed",
-    "reviewed",
+    "ticket_approved",
     "reported",
     "closed",
     "closed_rejected",
     "blocked",
 }
+ROUTE_VERBS = {
+    "internal",
+    "external",
+    "approve",
+    "rework",
+    "needs_info",
+    "reject",
+    "regression",
+    "not_regression",
+    "done",
+    "blocked",
+}
+JUMP_VERBS = {"rework", "needs_info"}
 BANNED = re.compile(
     r"(ci\.cmd\.|ci\.result\.|ci\.event\.|q\.agent\.|q\.orch\.|exchange\b|amqp://|http://|https://|localhost|127\.0\.0\.1)"
 )
+STEP_ID = re.compile(r"^[a-z][a-z0-9_]{0,15}$")
 
 
 @dataclass
@@ -61,7 +82,8 @@ class Step:
             mode=raw["mode"],
             max_attempts=int(raw.get("max_attempts", cfg.stage_max_attempts)),
             timeout_s=float(raw.get("timeout_s", cfg.stage_timeout_s)),
-            on=raw.get("on") or {},
+            # 路由表可能与注册表/内置计划共享同一份对象，解析时立刻深拷贝
+            on=copy.deepcopy(raw.get("on") or {}),
         )
 
 
@@ -109,7 +131,7 @@ class Plan:
                     "mode": s.mode,
                     "max_attempts": s.max_attempts,
                     "timeout_s": s.timeout_s,
-                    **({"on": s.on} if s.on else {}),
+                    **({"on": copy.deepcopy(s.on)} if s.on else {}),
                 }
                 for s in self.steps
             ],
@@ -120,9 +142,9 @@ class Plan:
         return yaml.safe_dump(self.to_dict(), sort_keys=False, allow_unicode=True)
 
 
-# --------------------------------------------------------------------------- 校验器 V1–V8
+# --------------------------------------------------------------------------- 校验器 V0–V9
 def validate_plan(plan_dict: dict, *, max_steps: int | None = None) -> list[str]:
-    """返回违规列表；空列表 = 合法。JSON Schema 打底 + V1–V8 语义规则。"""
+    """返回违规列表；空列表 = 合法。JSON Schema 打底 + V1–V9 语义规则。"""
     v: list[str] = []
     if any(True in s for s in plan_dict.get("steps") or []):
         plan_dict = {**plan_dict, "steps": normalize_steps(plan_dict.get("steps"))}
@@ -133,48 +155,106 @@ def validate_plan(plan_dict: dict, *, max_steps: int | None = None) -> list[str]
         return v
 
     steps = plan_dict.get("steps") or []
+    ids = [s["id"] for s in steps]
+    pos = {sid: i for i, sid in enumerate(ids)}
     limit = max_steps or cfg.max_plan_steps
+
     if not (1 <= len(steps) <= limit):  # V1
         v.append(f"V1 steps 数量 {len(steps)} 不在 [1,{limit}]")
     for s in steps:  # V2 / V3
-        if s["stage"] not in ALLOWED_STAGES:
+        stage, mode = s["stage"], s["mode"]
+        if stage not in ALLOWED_STAGES:
             v.append(
-                f"V2 禁止的 stage: {s['stage']}（monitor/reporting 之外的来源不允许）"
-                if s["stage"] != "monitor"
-                else "V2 monitor 只能由 Scheduler 触发，不能进计划"
+                f"V2 monitor 只能由 Scheduler 触发，不能进计划（step={s['id']}）"
+                if stage == "monitor"
+                else f"V2 禁止的 stage: {stage}（step={s['id']}）"
             )
-        elif s["mode"] not in STAGE_MODES[s["stage"]]:
+        elif mode not in STAGE_MODES[stage]:
             v.append(
-                f"V3 stage={s['stage']} 的 mode 只能是 {sorted(STAGE_MODES[s['stage']])}，实际 {s['mode']}"
+                f"V3 stage={stage} 的 mode 只能是 {sorted(STAGE_MODES[stage])}，"
+                f"实际 {mode}（step={s['id']}）"
             )
-    ids = [s["id"] for s in steps]
     if len(set(ids)) != len(ids):  # V7
         v.append("V7 step id 重复")
-    stages_seq = [s["stage"] for s in steps]
+    for sid in ids:
+        if not STEP_ID.match(sid):
+            v.append(f"V7 非法 step id: {sid!r}")
+
+    # ---------------- V4 主线形状：分流闸门必须在修/建单之前，报告必须最后 ----------------
     signal = plan_dict.get("signal", "unknown")
-    if signal == "error" and "review" not in stages_seq:  # V4
-        v.append("V4 signal=error 的计划必须包含 review")
-    if (
-        "reporting" in stages_seq
-        and "review" in stages_seq
-        and stages_seq.index("reporting") < stages_seq.index("review")
-    ):
-        v.append("V4 reporting 必须在 review 之后")
-    for s in steps:  # V5 / V6
-        for route in (s.get("on") or {}).values():
+    has = {(s["stage"], s["mode"]) for s in steps}
+    if signal == "error":
+        if not steps or steps[0]["stage"] != "triage":
+            v.append("V4 signal=error 的计划必须以 triage 开头")
+        if ("reviewer", "gate1") not in has:
+            v.append(
+                "V4 signal=error 的计划必须包含 reviewer:gate1（闸门 1 决定 internal/external）"
+            )
+        ordered = (
+            (("reviewer", "gate2"), ("reviewer", "gate1"), "V4 闸门 2 必须在闸门 1 之后"),
+            (("reviewer", "gate3"), ("reviewer", "gate1"), "V4 闸门 3 必须在闸门 1 之后"),
+            (
+                ("reproduction", "verify"),
+                ("remediation", "fix"),
+                "V4 修复验证（5a）必须在 4a 修复之后",
+            ),
+            (
+                ("regression", "bisect"),
+                ("regression", "check"),
+                "V4 二分定位（6c）必须在回归判定（5b）之后",
+            ),
+            (
+                ("ticketing", "create"),
+                ("regression", "check"),
+                "V4 建单（7b）必须在回归判定（5b）之后",
+            ),
+        )
+        for later, earlier, msg in ordered:
+            if later in has and earlier in has and _first(steps, *later) < _first(steps, *earlier):
+                v.append(msg)
+    if ("reporting", "case") in has:
+        last = max(pos.values()) if pos else 0
+        if pos.get(_last_id(steps, "reporting"), -1) != last:
+            v.append("V4 reporting 必须是计划的最后一步（且只能出现一次）")
+        if sum(1 for s in steps if s["stage"] == "reporting" and s["mode"] == "case") > 1:
+            v.append("V4 reporting:case 在一个计划里只能出现一次")
+
+    # ---------------- V5 / V6 路由与回炉 ----------------
+    for s in steps:
+        on = s.get("on") or {}
+        for verb, route in on.items():
+            if verb not in ROUTE_VERBS:
+                v.append(f"V5 step={s['id']} 非法路由动词 {verb!r}")
+                continue
+            if ("jump" in route) != (verb in JUMP_VERBS):
+                v.append(
+                    f"V5 step={s['id']} 的 {verb} 路由必须"
+                    f"{'是 jump（回炉）' if verb in JUMP_VERBS else '是 next/end（前向）'}"
+                )
+            if "jump" in route:
+                if "next" in route or "end" in route:
+                    v.append(f"V5 step={s['id']} 的 {verb} 是回炉路由，不能再带 next/end")
+            elif ("next" in route) == ("end" in route):
+                v.append(f"V5 step={s['id']} 的 {verb} 路由必须且只能有 next 或 end 之一")
             if "jump" in route:
                 tgt = route["jump"]
-                if tgt not in ids:
+                if tgt not in pos:
                     v.append(f"V5 jump 目标不存在: {tgt}")
-                elif ids.index(tgt) >= ids.index(s["id"]):
+                elif pos[tgt] >= pos[s["id"]]:
                     v.append(f"V5 jump 必须回到更早的 step: {s['id']} -> {tgt}")
                 loops = int(route.get("max_loops", cfg.max_review_loops))
                 if loops > cfg.max_review_loops:
                     v.append(f"V6 max_loops={loops} 超过上限 {cfg.max_review_loops}")
-            elif "next" in route and route["next"] not in ids:
-                v.append(f"V5 next 目标不存在: {route['next']}")
+            elif "next" in route:
+                tgt = route["next"]
+                if tgt not in pos:
+                    v.append(f"V5 next 目标不存在: {tgt}")
+                elif pos[tgt] <= pos[s["id"]]:
+                    v.append(f"V5 next 只能前向: {s['id']} -> {tgt}（回炉请用 jump）")
             if route.get("set_status") and route["set_status"] not in STATUS_ENUM:
                 v.append(f"V5 非法 set_status: {route['set_status']}")
+
+    # ---------------- V8 防注入 ----------------
     for text in (plan_dict.get("rationale") or "", plan_dict.get("model") or ""):  # V8
         if BANNED.search(text or ""):
             v.append(
@@ -184,7 +264,41 @@ def validate_plan(plan_dict: dict, *, max_steps: int | None = None) -> list[str]
         for val in [s["stage"], s["mode"], s["id"]]:
             if not isinstance(val, str) or BANNED.search(val):
                 v.append(f"V8 step 字段非法: {val!r}")
+
+    # ---------------- V9 分支闭合 ----------------
+    for s in steps:
+        on = s.get("on") or {}
+        if (
+            (s["stage"], s["mode"]) == ("reviewer", "gate1")
+            and signal == "error"
+            and ("internal" not in on or "external" not in on)
+        ):
+            v.append(
+                f"V9 step={s['id']}（gate1）必须同时给出 internal 与 external 路由，否则双分支无法闭合"
+            )
+        if (s["stage"], s["mode"]) == ("reviewer", "gate2") and "approve" not in on:
+            v.append(f"V9 step={s['id']}（gate2）必须给出 approve 路由")
+        if (s["stage"], s["mode"]) == ("reviewer", "gate3") and "approve" not in on:
+            v.append(f"V9 step={s['id']}（gate3）必须给出 approve 路由")
+        if (s["stage"], s["mode"]) == ("regression", "check") and (
+            "regression" not in on or "not_regression" not in on
+        ):
+            v.append(f"V9 step={s['id']}（5b）必须同时给出 regression 与 not_regression 路由")
     return v
+
+
+def _first(steps: list[dict], stage: str, mode: str) -> int:
+    for i, s in enumerate(steps):
+        if s["stage"] == stage and s["mode"] == mode:
+            return i
+    return len(steps) + 1
+
+
+def _last_id(steps: list[dict], stage: str) -> str | None:
+    for s in reversed(steps):
+        if s["stage"] == stage:
+            return s["id"]
+    return None
 
 
 def normalize_steps(steps: list[dict]) -> list[dict]:
@@ -297,9 +411,14 @@ class PlanResolver:
 
 # --------------------------------------------------------------------------- LLM 兜底
 PLAN_PROMPT = """你是 CI 故障编排规划器。为下面这个 Case 选择执行计划，只输出 YAML（符合 plan 契约）。
-可选 stage：triage(full|classify_only) / reproduction(run) / ticket(run) / review(run) / reporting(case)。
-硬性规则：signal=error 必须包含 review；reporting 只能在 review 之后；step id 用小写字母数字；
-不允许出现队列名、exchange 名、URL、命令字面量。最多 {max_steps} 步。rationale 用一句中文说明取舍。
+8 个 Agent 的 mode：
+  triage(classify) / reviewer(gate1|gate2|gate3) / remediation(fix) /
+  reproduction(evidence|verify) / regression(check|bisect) / ticketing(create) / reporting(case)
+硬性规则：signal=error 必须先 triage 再 reviewer:gate1；gate1 必须给出 internal/external 双路由；
+内部路径 = remediation:fix → reproduction:verify → reviewer:gate2；
+外部路径 = reproduction:evidence → regression:check →（回归则 regression:bisect）→ ticketing:create → reviewer:gate3；
+reporting:case 必须是最后一步；回炉只能用 jump 且只能指向更早的 step；最多 {max_steps} 步。
+不允许出现队列名、exchange 名、URL、命令字面量。rationale 用一句中文说明取舍。
 Case 摘要：{ctx}
 """
 
@@ -311,10 +430,10 @@ class LLMPlanner:
         self.fixtures = Path(fixtures_dir or cfg.fixtures_dir) / "plans"
 
     def _raw(self, scenario: str | None = None) -> dict:
-        scenario = scenario or cfg.plan_mock_scenario or "warming_ok"
+        scenario = scenario or cfg.plan_mock_scenario or "internal_ok"
         path = self.fixtures / f"{scenario}.yaml"
         if not path.exists():
-            path = self.fixtures / "warming_ok.yaml"
+            path = self.fixtures / "internal_ok.yaml"
         return yaml.safe_load(path.read_text(encoding="utf-8"))
 
     def build(
@@ -389,19 +508,107 @@ class LLMPlanner:
 
 # --------------------------------------------------------------------------- 内置安全网
 BUILTIN_PLANS: dict[str, dict] = {
-    "s1_lite": {"steps": [{"id": "t1", "stage": "triage", "mode": "classify_only"}]},
+    "s1_observe_only": {
+        "steps": [
+            {"id": "t1", "stage": "triage", "mode": "classify"},
+            {"id": "p1", "stage": "reporting", "mode": "case"},
+        ]
+    },
     "s2_full": {
         "steps": [
-            {"id": "t1", "stage": "triage", "mode": "full"},
-            {"id": "r1", "stage": "reproduction", "mode": "run"},
-            {"id": "k1", "stage": "ticket", "mode": "run"},
+            {"id": "t1", "stage": "triage", "mode": "classify"},
             {
-                "id": "v1",
-                "stage": "review",
-                "mode": "run",
+                "id": "g1",
+                "stage": "reviewer",
+                "mode": "gate1",
                 "on": {
-                    "approve": {"next": "p1"},
+                    "internal": {"next": "r1", "set_status": "routed_internal"},
+                    "external": {"next": "e1", "set_status": "routed_external"},
                     "needs_info": {"jump": "t1", "max_loops": 2, "set_status": "triaged"},
+                    "reject": {"end": True, "set_status": "closed_rejected"},
+                },
+            },
+            {"id": "r1", "stage": "remediation", "mode": "fix"},
+            {"id": "v1", "stage": "reproduction", "mode": "verify"},
+            {
+                "id": "g2",
+                "stage": "reviewer",
+                "mode": "gate2",
+                "on": {
+                    "approve": {"next": "p1", "set_status": "fix_approved"},
+                    "rework": {"jump": "r1", "max_loops": 2, "set_status": "remediated"},
+                    "reject": {"end": True, "set_status": "closed_rejected"},
+                },
+            },
+            {"id": "e1", "stage": "reproduction", "mode": "evidence"},
+            {
+                "id": "c1",
+                "stage": "regression",
+                "mode": "check",
+                "on": {
+                    "regression": {"next": "b1", "set_status": "regression_checked"},
+                    "not_regression": {"next": "k1", "set_status": "reproduced"},
+                },
+            },
+            {"id": "b1", "stage": "regression", "mode": "bisect"},
+            {"id": "k1", "stage": "ticketing", "mode": "create"},
+            {
+                "id": "g3",
+                "stage": "reviewer",
+                "mode": "gate3",
+                "on": {
+                    "approve": {"next": "p1", "set_status": "ticket_approved"},
+                    "needs_info": {"jump": "k1", "max_loops": 2, "set_status": "ticketed"},
+                    "reject": {"end": True, "set_status": "closed_rejected"},
+                },
+            },
+            {"id": "p1", "stage": "reporting", "mode": "case"},
+        ]
+    },
+    "s3_test_no_repro": {
+        "steps": [
+            {"id": "t1", "stage": "triage", "mode": "classify"},
+            {
+                "id": "g1",
+                "stage": "reviewer",
+                "mode": "gate1",
+                "on": {
+                    "internal": {"next": "r1", "set_status": "routed_internal"},
+                    "external": {"next": "c1", "set_status": "routed_external"},
+                    "needs_info": {"jump": "t1", "max_loops": 2, "set_status": "triaged"},
+                    "reject": {"end": True, "set_status": "closed_rejected"},
+                },
+            },
+            {"id": "r1", "stage": "remediation", "mode": "fix"},
+            {"id": "v1", "stage": "reproduction", "mode": "verify"},
+            {
+                "id": "g2",
+                "stage": "reviewer",
+                "mode": "gate2",
+                "on": {
+                    "approve": {"next": "p1", "set_status": "fix_approved"},
+                    "rework": {"jump": "r1", "max_loops": 2, "set_status": "remediated"},
+                    "reject": {"end": True, "set_status": "closed_rejected"},
+                },
+            },
+            {
+                "id": "c1",
+                "stage": "regression",
+                "mode": "check",
+                "on": {
+                    "regression": {"next": "b1", "set_status": "regression_checked"},
+                    "not_regression": {"next": "k1", "set_status": "reproduced"},
+                },
+            },
+            {"id": "b1", "stage": "regression", "mode": "bisect"},
+            {"id": "k1", "stage": "ticketing", "mode": "create"},
+            {
+                "id": "g3",
+                "stage": "reviewer",
+                "mode": "gate3",
+                "on": {
+                    "approve": {"next": "p1", "set_status": "ticket_approved"},
+                    "needs_info": {"jump": "k1", "max_loops": 2, "set_status": "ticketed"},
                     "reject": {"end": True, "set_status": "closed_rejected"},
                 },
             },
@@ -409,6 +616,10 @@ BUILTIN_PLANS: dict[str, dict] = {
         ]
     },
 }
+
+
+def builtin_key(signal: str) -> str:
+    return "s2_full" if signal == "error" else "s1_observe_only"
 
 
 def builtin_plan(key: str, signal: str) -> Plan:
@@ -422,7 +633,7 @@ def builtin_plan(key: str, signal: str) -> Plan:
         "scope": "case",
         "signal": signal,
         "rationale": f"degraded 安全网：使用内置 {key}",
-        "steps": BUILTIN_PLANS[key]["steps"],
+        "steps": copy.deepcopy(BUILTIN_PLANS[key]["steps"]),
         "validator": "plan-validator/v1",
     }
     violations = validate_plan(raw)
@@ -452,3 +663,21 @@ class PlanStore:
     def read(self, case_id: str, plan_id: str) -> str | None:
         p = self.plans_dir / case_id / f"{plan_id}.yaml"
         return p.read_text(encoding="utf-8") if p.exists() else None
+
+
+__all__ = [
+    "ALLOWED_STAGES",
+    "BUILTIN_PLANS",
+    "STAGE_MODES",
+    "STATUS_ENUM",
+    "LLMPlanner",
+    "Plan",
+    "PlanResolver",
+    "PlanStore",
+    "Step",
+    "builtin_key",
+    "builtin_plan",
+    "normalize_steps",
+    "plan_from_dict",
+    "validate_plan",
+]

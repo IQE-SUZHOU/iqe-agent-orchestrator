@@ -1,0 +1,11 @@
+{
+  "gate1": {
+    "verdict": "reject",
+    "reason_code": "insufficient_evidence",
+    "requested_info": [
+      "原始 job 的完整 console 日志",
+      "同签名族的历史构建号"
+    ],
+    "notes": "只有一行错误摘要，无法判断 internal/external"
+  }
+}

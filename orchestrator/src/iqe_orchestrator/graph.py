@@ -1,6 +1,12 @@
 """LangGraph 编排图：resolve_plan → validate_plan → step → advance → finalize。
 
-关键点：图结构固定，具体走哪些段完全由 plan.steps + on 规则决定；执行期不调用模型。
+流程图上的 12 个阶段收敛成 8 个 Agent 的 mode（见 ``common/contracts.py``），
+计划层只描述 step，执行期不调用模型：
+
+- ``next``：前向跳转 —— 闸门 1 的 internal / external 双分支、非回归跳过 6c；
+- ``jump``：后向回炉 —— 闸门 1/3 的 needs_info 回到上游、闸门 2 的 rework 回到 4a；
+
+step 输出按 **step_id** 存放：reviewer 在一个计划里会跑三道闸门，按 stage 存会互相覆盖。
 Dispatch–Await 在 step 节点内完成（发命令 → 等 Future → 超时/重试/blocked）。
 """
 
@@ -14,21 +20,39 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 
 from iqe_orchestrator.common.config import cfg
+from iqe_orchestrator.common.contracts import validate_stage_contract
 from iqe_orchestrator.common.db import DB
 from iqe_orchestrator.common.envelope import now_iso, ulid
+from iqe_orchestrator.common.kb import normalize_write
 from iqe_orchestrator.common.logs import counters, log_with
 
 from .dispatch import BusGateway
-from .plan import LLMPlanner, Plan, PlanResolver, PlanStore, plan_from_dict, validate_plan
+from .plan import (
+    LLMPlanner,
+    PlanResolver,
+    PlanStore,
+    builtin_key,
+    builtin_plan,
+    plan_from_dict,
+    validate_plan,
+)
 
 log = logging.getLogger("orchestrator.graph")
 
-STAGE_STATUS = {
-    "triage": "triaged",
-    "reproduction": "reproduced",
-    "ticket": "ticketed",
-    "review": "reviewed",
-    "reporting": "reported",
+#: 某一步成功后 Case 应该落在哪个状态（路由里的 set_status 优先）。
+STATUS_AFTER: dict[tuple[str, str], str] = {
+    ("triage", "classify"): "triaged",
+    ("reviewer", "gate1"): "triaged",
+    ("remediation", "fix"): "remediated",
+    ("reproduction", "verify"): "fix_verified",
+    ("reviewer", "gate2"): "fix_approved",
+    ("reproduction", "evidence"): "reproduced",
+    ("regression", "check"): "regression_checked",
+    ("regression", "bisect"): "bisected",
+    ("ticketing", "create"): "ticketed",
+    ("reviewer", "gate3"): "ticket_approved",
+    ("reporting", "case"): "reported",
+    ("reporting", "daily"): "reported",
 }
 
 
@@ -52,8 +76,11 @@ class CaseState(TypedDict, total=False):
     step_status: dict[str, str]
     attempts: dict[str, int]
     outputs: dict[str, dict]
+    completed: list[str]
+    loops: dict[str, int]
     pending_verb: str | None
     pending_route: dict | None
+    loop_count: int
     review_loop_seq: int
     jump_count: int
     requested_focus: str | None
@@ -117,6 +144,9 @@ class CaseEngine:
             "step_status": {},
             "attempts": {},
             "outputs": {},
+            "completed": [],
+            "loops": {},
+            "loop_count": 0,
             "review_loop_seq": 0,
             "jump_count": 0,
             "evidence_count": 0,
@@ -161,7 +191,10 @@ class CaseEngine:
             "step_status": {},
             "attempts": dict(seeded_attempts),
             "outputs": {},
-            "review_loop_seq": int(progress.get("review_loop_seq", 0) or 0),
+            "completed": [],
+            "loops": {},
+            "loop_count": 0,
+            "review_loop_seq": 0,
             "jump_count": 0,
             "evidence_count": 0,
             "status": "created",
@@ -218,6 +251,8 @@ class CaseEngine:
                 ],
                 "step_status": final.get("step_status", {}),
                 "attempts": final.get("attempts", {}),
+                "completed": final.get("completed", []),
+                "loops": final.get("loops", {}),
                 "review_loop_seq": final.get("review_loop_seq", 0),
                 "jump_count": final.get("jump_count", 0),
                 "gen": final.get("gen", 1),
@@ -296,8 +331,8 @@ class CaseEngine:
                 "degraded": False,
             }
         if cfg.plan_mode == "strict":
-            key = "s2_full" if signal == "error" else "s1_lite"
-            plan = _builtin(key, signal)
+            key = builtin_key(signal)
+            plan = builtin_plan(key, signal)
             log_with(log, "warn", "plan_degraded_strict", case_id=s["case_id"], builtin=key)
             return {
                 "plan": plan.to_dict(),
@@ -310,8 +345,8 @@ class CaseEngine:
             signal=signal, job=job, signature=sig, hint=s.get("scenario_hint")
         )
         if plan is None:
-            key = "s2_full" if signal == "error" else "s1_lite"
-            plan = _builtin(key, signal)
+            key = builtin_key(signal)
+            plan = builtin_plan(key, signal)
             log_with(
                 log,
                 "warn",
@@ -437,7 +472,7 @@ class CaseEngine:
 
         for attempt in range(attempt_prev + 1, attempt_prev + max_attempts + 1):
             attempts[step_id] = attempt
-            payload = await self._build_input(s, stage, mode)
+            payload = await self._build_input(s, raw)
             res = await self.gw.dispatch(
                 stage=stage,
                 mode=mode,
@@ -451,15 +486,22 @@ class CaseEngine:
                 timeout_s=float(raw.get("timeout_s", cfg.stage_timeout_s)),
             )
             trace.append(
-                {"at": now_iso(), "event": f"{stage}:{step_id}:attempt{attempt}:{res.status}"}
+                {
+                    "at": now_iso(),
+                    "event": f"{stage}:{mode}:{step_id}:attempt{attempt}:{res.status}",
+                }
             )
             if res.status == "ok":
-                outputs[stage] = res.output
-                verb = self._verb_for(stage, res.output)
+                outputs[step_id] = res.output
+                self._check_output(stage, mode, res.output, s["case_id"])
+                verb = self._verb_for(stage, mode, res.output)
                 step_status[step_id] = "done"
-                status = (raw.get("on", {}).get(verb, {}) or {}).get("set_status") or STAGE_STATUS[
-                    stage
-                ]
+                route = self._route_for(raw, verb)
+                status = (
+                    (route or {}).get("set_status")
+                    or STATUS_AFTER.get((stage, mode))
+                    or s["status"]
+                )
                 break
             if res.status in ("retryable", "timeout") and attempt < max_attempts:
                 log_with(
@@ -468,20 +510,21 @@ class CaseEngine:
                     "step_retry",
                     case_id=s["case_id"],
                     stage=stage,
+                    mode=mode,
                     step_id=step_id,
                     attempt=attempt,
                     reason=(res.error or {}).get("code"),
                 )
                 continue
             step_status[step_id] = "blocked"
-            counters.inc("ci_steps_blocked_total", stage=stage)
+            counters.inc("ci_steps_blocked_total", stage=stage, mode=mode)
             merged = {
                 **self._progress(s, outputs, attempts, step_status, trace),
                 "terminated": True,
                 "status": "blocked",
                 "cursor": idx,
-                "blocked_reason": f"{stage} 第 {attempt} 次仍失败: {(res.error or {}).get('code')} "
-                f"{(res.error or {}).get('detail', '')}"[:300],
+                "blocked_reason": f"{stage}:{mode} 第 {attempt} 次仍失败: "
+                f"{(res.error or {}).get('code')} {(res.error or {}).get('detail', '')}"[:300],
                 "pending_verb": None,
                 "pending_route": None,
             }
@@ -489,58 +532,43 @@ class CaseEngine:
             return merged
 
         evidence_count = len(await self.db.evidence(s["case_id"]))
-        if stage == "review" and outputs.get("review", {}).get("verdict"):
-            await self.db.save_review(
-                case_id=s["case_id"],
-                output=outputs["review"],
-                loop_seq=int(s.get("review_loop_seq", 0) or 0) + 1,
-            )
-        if stage == "ticket" and outputs.get("ticket", {}).get("ticket_status"):
-            await self.db.save_ticket(
-                case_id=s["case_id"], backend=cfg.ticket_backend, output=outputs["ticket"]
-            )
-        if stage == "reporting":
-            rep = outputs.get("reporting") or {}
-            if mode == "daily":
-                day = rep.get("day") or _today()
-                await self.db.save_daily_report(
-                    day=day,
-                    report_md=rep.get("report_md", ""),
-                    metrics=rep.get("metrics", {}),
-                    cases=rep.get("metrics", {}).get("cases", []),
-                )
-            else:
-                await self.db.set_case_status(
-                    s["case_id"],
-                    s["status"],
-                    case_report={
-                        "report_md": (rep.get("report_md") or "")[:4000],
-                        "written_at": now_iso(),
-                    },
-                )
+        await self._store_artifacts(s, step_id, stage, mode, outputs.get(step_id) or {}, status)
+        completed = [sid for sid in s.get("completed", []) if sid != step_id] + [step_id]
         await self.gw.publish_event(
             rk=f"ci.event.case.{status}",
             correlation_id=s["case_id"],
-            data={"stage": stage, "step_id": step_id, "verb": verb},
+            data={"stage": stage, "mode": mode, "step_id": step_id, "verb": verb},
         )
-        route = (raw.get("on") or {}).get(verb or "", {}) or (raw.get("on") or {}).get("done", {})
+        route = self._route_for(raw, verb or "")
         log_with(
             log,
             "info",
             "step_ok",
             case_id=s["case_id"],
             stage=stage,
+            mode=mode,
             step_id=step_id,
             verb=verb,
             evidence_count=evidence_count,
         )
         merged = {
             **self._progress(s, outputs, attempts, step_status, trace),
+            "completed": completed,
             "status": status,
             "evidence_count": evidence_count,
             "pending_verb": verb,
             "pending_route": route,
         }
+        if route is None:
+            merged.update(
+                {
+                    "terminated": True,
+                    "status": "blocked",
+                    "blocked_reason": f"{stage}:{mode}（step={step_id}）返回了 {verb!r}，"
+                    "但计划没有对应的 on 路由"[:300],
+                    "cursor": idx,
+                }
+            )
         await self._persist({**dict(s), **merged})
         return merged
 
@@ -560,27 +588,31 @@ class CaseEngine:
         cursor = s["cursor"]
         step_status = dict(s.get("step_status", {}))
         outputs = dict(s.get("outputs", {}))
+        completed = list(s.get("completed", []))
+        loops = dict(s.get("loops", {}))
         trace = list(s.get("trace", []))
         status = s["status"]
-        review_loop = int(s.get("review_loop_seq", 0))
-        jump_count = int(s.get("jump_count", 0))
+        loop_count = int(s.get("review_loop_seq", 0))
         requested_focus = s.get("requested_focus")
 
         if "jump" in route:
             target = route["jump"]
-            loops = int(route.get("max_loops", cfg.max_review_loops))
-            if review_loop + 1 > loops:  # 预算已用尽：这次跳转不会发生，计数也不加
-                counters.inc("ci_review_loop_exhausted_total")
+            loops_limit = int(route.get("max_loops", cfg.max_review_loops))
+            key = f"{plan['steps'][cursor]['id']}:{s.get('pending_verb') or 'jump'}"
+            used = int(loops.get(key, 0))
+            if used + 1 > loops_limit:  # 预算已用尽：这次跳转不会发生，计数也不加
+                counters.inc("ci_review_loop_exhausted_total", step=key)
                 return {
                     "terminated": True,
                     "status": "blocked",
-                    "review_loop_seq": review_loop,
-                    "jump_count": jump_count,
-                    "blocked_reason": f"复核回炉超过 {loops} 轮仍未通过",
-                    "trace": [*trace, {"at": now_iso(), "event": "review_loop_exhausted"}],
+                    "review_loop_seq": loop_count,
+                    "jump_count": loop_count,
+                    "loops": loops,
+                    "blocked_reason": f"{key} 回炉超过 {loops_limit} 轮仍未通过",
+                    "trace": [*trace, {"at": now_iso(), "event": f"loop_exhausted:{key}"}],
                 }
-            review_loop += 1  # 只有真正发生的跳转才计数
-            jump_count += 1
+            loops[key] = used + 1  # 只有真正发生的跳转才计数
+            loop_count += 1
             tgt_idx = next((i for i, st in enumerate(plan["steps"]) if st["id"] == target), None)
             if tgt_idx is None:
                 return {
@@ -588,11 +620,17 @@ class CaseEngine:
                     "status": "blocked",
                     "blocked_reason": f"jump 目标 {target} 不存在",
                 }
-            for st in plan["steps"][tgt_idx + 1 :]:
-                outputs.pop(st["stage"], None)
-                step_status.pop(st["id"], None)
-            review = outputs.get("review") or {}
-            requested_focus = "; ".join(review.get("requested_info", []))[:400] or requested_focus
+            trigger = outputs.get(plan["steps"][cursor]["id"]) or {}
+            requested_focus = (
+                "; ".join(str(x) for x in (trigger.get("requested_info") or []))[:400]
+                or requested_focus
+            )
+            # 回炉：target 及其之后的输出/状态全部作废（reviewer 三道闸门按 step_id 存，逐个清）
+            future_ids = {st["id"] for st in plan["steps"][tgt_idx:]}
+            for sid in future_ids:
+                outputs.pop(sid, None)
+                step_status.pop(sid, None)
+            completed = [sid for sid in completed if sid not in future_ids]
             status = route.get("set_status") or "triaged"
             log_with(
                 log,
@@ -600,27 +638,31 @@ class CaseEngine:
                 "plan_jump",
                 case_id=s["case_id"],
                 target=target,
-                review_loop=review_loop,
+                loop_key=key,
+                loop_seq=loops[key],
                 requested_focus=(requested_focus or "")[:120],
             )
             return {
                 "cursor": tgt_idx,
                 "outputs": outputs,
                 "step_status": step_status,
+                "completed": completed,
                 "status": status,
-                "review_loop_seq": review_loop,
-                "jump_count": jump_count,
+                "loops": loops,
+                "review_loop_seq": loop_count,
+                "jump_count": loop_count,
                 "requested_focus": requested_focus,
                 "terminated": False,
                 "pending_route": None,
                 "pending_verb": None,
-                "trace": [*trace, {"at": now_iso(), "event": f"jump:{target}:loop{review_loop}"}],
+                "trace": [*trace, {"at": now_iso(), "event": f"jump:{target}:loop{loops[key]}"}],
             }
 
         if route.get("end"):
             return {
                 "terminated": True,
                 "status": route.get("set_status") or status,
+                "loops": loops,
                 "pending_route": None,
                 "trace": [*trace, {"at": now_iso(), "event": "plan_end"}],
             }
@@ -640,6 +682,7 @@ class CaseEngine:
                 "cursor": cursor,
                 "terminated": True,
                 "status": route.get("set_status") or "closed",
+                "loops": loops,
                 "pending_route": None,
                 "trace": [*trace, {"at": now_iso(), "event": "plan_exhausted"}],
             }
@@ -648,6 +691,7 @@ class CaseEngine:
             "terminated": False,
             "pending_route": None,
             "pending_verb": None,
+            "loops": loops,
             "trace": trace,
         }
         await self._persist({**dict(s), **merged})
@@ -663,8 +707,11 @@ class CaseEngine:
             ],
             "step_status": s.get("step_status", {}),
             "attempts": s.get("attempts", {}),
+            "completed": s.get("completed", []),
+            "loops": s.get("loops", {}),
             "review_loop_seq": s.get("review_loop_seq", 0),
             "jump_count": s.get("jump_count", 0),
+            "requested_focus": s.get("requested_focus"),
             "gen": s.get("gen", 1),
             "plan_id": s.get("plan_id"),
             "plan_source": s.get("plan_source"),
@@ -706,6 +753,78 @@ class CaseEngine:
             "trace": trace,
         }
 
+    # ------------------------------------------------------------- 落库
+    async def _store_artifacts(
+        self, s: CaseState, step_id: str, stage: str, mode: str, output: dict, status: str
+    ) -> None:
+        """把 Agent 的输出写进它对应的表：Agent 只写 evidence，业务表归编排层。"""
+        case_id = s["case_id"]
+        if stage == "reviewer":
+            await self.db.save_review(
+                case_id=case_id,
+                output=output,
+                loop_seq=int(s.get("review_loop_seq", 0)) + 1,
+                gate=mode,
+            )
+        elif stage == "remediation":
+            await self.db.save_remediation(case_id=case_id, output=output)
+        elif stage == "reproduction":
+            await self.db.save_verification(case_id=case_id, output=output)
+        elif stage == "regression":
+            await self.db.save_regression(case_id=case_id, output=output)
+        elif stage == "ticketing":
+            if output.get("ticket_status"):
+                await self.db.save_ticket(
+                    case_id=case_id,
+                    backend=str(output.get("backend") or cfg.ticket_backend),
+                    output=output,
+                )
+        elif stage == "reporting":
+            if mode == "daily":
+                day = output.get("day") or _today()
+                metrics = output.get("metrics") or {}
+                await self.db.save_daily_report(
+                    day=day,
+                    report_md=output.get("report_md") or "",
+                    metrics=metrics,
+                    cases=metrics.get("cases") or [],
+                )
+            else:
+                # 阶段 9 把结论回写共享知识库（写权仍在编排层）
+                for raw in output.get("kb_writes") or []:
+                    await self.db.kb_write(
+                        normalize_write({**raw, "case_id": raw.get("case_id") or case_id})
+                    )
+                await self.db.set_case_status(
+                    case_id,
+                    status,
+                    case_report={
+                        "report_md": (output.get("report_md") or "")[:4000],
+                        "written_at": now_iso(),
+                    },
+                )
+
+    @staticmethod
+    def _check_output(stage: str, mode: str, output: dict, case_id: str) -> None:
+        """出参软校验：不合契约只告警（Agent 侧已经校验过，这里防的是版本漂移）。"""
+        try:
+            import jsonschema
+
+            jsonschema.validate(
+                instance=dict(output), schema=validate_stage_contract(stage, "output")
+            )
+        except Exception as exc:
+            counters.inc("ci_stage_output_violations_total", stage=stage, mode=mode)
+            log_with(
+                log,
+                "warn",
+                "stage_output_contract_violation",
+                case_id=case_id,
+                stage=stage,
+                mode=mode,
+                err=str(exc)[:300],
+            )
+
     # ------------------------------------------------------------- 辅助
     @staticmethod
     def _progress(s: CaseState, outputs, attempts, step_status, trace) -> dict:
@@ -714,30 +833,66 @@ class CaseEngine:
             "attempts": attempts,
             "step_status": step_status,
             "trace": trace,
+            "loops": s.get("loops", {}),
             "review_loop_seq": int(s.get("review_loop_seq", 0)),
             "jump_count": int(s.get("jump_count", 0)),
         }
 
     @staticmethod
-    def _verb_for(stage: str, output: dict) -> str:
-        if stage == "triage":
-            return "classified_error" if output.get("repro_eligible") else "classified_none"
-        if stage == "review":
-            return output.get("verdict") or "approve"
+    def _verb_for(stage: str, mode: str, output: dict) -> str:
+        """把 Agent 输出翻成计划里的路由动词（计划只认这几个词）。"""
+        if stage == "reviewer":
+            verdict = str(output.get("verdict") or "approve")
+            if mode == "gate1" and verdict == "approve":
+                return str(output.get("decision") or "external")
+            return verdict
+        if stage == "regression" and mode == "check":
+            return "regression" if output.get("is_regression") else "not_regression"
         return "done"
 
-    async def _build_input(self, s: CaseState, stage: str, mode: str) -> dict:
-        outputs = s.get("outputs", {})
+    @staticmethod
+    def _route_for(raw: dict, verb: str) -> dict | None:
+        """取这一步的路由；返回 None 表示「计划没写这个动词的路由」（视为计划缺陷）。"""
+        on = raw.get("on") or {}
+        if not on:  # 没写 on：顺序执行下一步
+            return {}
+        if verb in on:
+            return on[verb] or {}
+        if "done" in on:
+            return on["done"] or {}
+        return None
+
+    @staticmethod
+    def _latest(s: CaseState, stage: str, mode: str | None = None) -> dict:
+        """按执行顺序取某个 stage（可指定 mode）最近一次成功的输出。"""
+        steps = {st["id"]: st for st in (s.get("plan") or {}).get("steps", [])}
+        outputs = s.get("outputs") or {}
+        for sid in reversed(s.get("completed") or []):
+            st = steps.get(sid)
+            if not st or st["stage"] != stage:
+                continue
+            if mode and st["mode"] != mode:
+                continue
+            out = outputs.get(sid)
+            if out is not None:
+                return dict(out)
+        return {}
+
+    async def _build_input(self, s: CaseState, raw: dict) -> dict:
+        stage, mode = raw["stage"], raw["mode"]
         obs = s.get("payload") or {}
-        triage = outputs.get("triage") or {}
-        repro = outputs.get("reproduction") or {}
-        ticket = outputs.get("ticket") or {}
         base = {
             "case_id": s["case_id"],
             "build": s.get("build"),
             "source": obs.get("source", "mock"),
             "job": s["job"],
         }
+        if stage == "reporting":
+            if mode == "case":
+                return {"case_id": s["case_id"], "day": None}
+            return {"case_id": None, "day": _today()}
+
+        triage = self._latest(s, "triage")
         if stage == "triage":
             return {
                 **base,
@@ -748,57 +903,70 @@ class CaseEngine:
                 "evidence_refs": obs.get("evidence_refs") or [],
                 "requested_focus": s.get("requested_focus"),
             }
-        if stage == "reproduction":
-            return {
-                **base,
-                "rca": triage.get("rca", "unknown"),
-                "signature": triage.get("signature") or s.get("signature"),
-                "key_frames": triage.get("key_frames") or [],
+
+        # 其余阶段都以分诊结论为前提（2 号阶段）
+        common = {
+            **base,
+            "rca": triage.get("rca") or "unknown",
+            "component": triage.get("component"),
+            "signature": triage.get("signature") or s.get("signature"),
+            "key_frames": triage.get("key_frames") or [],
+        }
+        if stage == "reviewer":
+            payload = {
+                **common,
+                "signal": s["signal"],
+                "path": triage.get("path"),
+                "confidence": triage.get("confidence"),
+                "evidence_count": len(await self.db.evidence(s["case_id"])),
+                "loop_seq": min(int(s.get("review_loop_seq", 0)) + 1, 5),
                 "requested_focus": s.get("requested_focus"),
             }
-        if stage == "ticket":
+            if mode == "gate2":
+                payload["remediation"] = self._latest(s, "remediation")
+                payload["reproduction"] = self._latest(s, "reproduction", "verify")
+            elif mode == "gate3":
+                payload["reproduction"] = self._latest(s, "reproduction", "evidence")
+                payload["regression"] = self._latest(s, "regression")
+                payload["ticketing"] = self._latest(s, "ticketing")
+            return payload
+        if stage == "remediation":
             return {
-                **base,
+                **common,
+                "kb_fix_refs": list(triage.get("kb_refs") or []),
+                "requested_focus": s.get("requested_focus"),
+            }
+        if stage == "reproduction":
+            payload = {**common, "requested_focus": s.get("requested_focus")}
+            if mode == "verify":
+                payload["remediation"] = self._latest(s, "remediation")
+            return payload
+        if stage == "regression":
+            check = self._latest(s, "regression", "check")
+            payload = {
+                **common,
+                "reproduction": self._latest(s, "reproduction", "evidence"),
+                "requested_focus": s.get("requested_focus"),
+            }
+            if mode == "bisect":
+                payload["baseline"] = check.get("baseline")
+                payload["change_window"] = check.get("change_window")
+            return payload
+        if stage == "ticketing":
+            return {
+                **common,
                 "signal": s["signal"],
-                "signature": triage.get("signature") or s.get("signature"),
-                "rca": triage.get("rca", "unknown"),
-                "reproducible": repro.get("reproducible"),
+                "path": triage.get("path"),
+                "reproduction": self._latest(s, "reproduction", "evidence"),
+                "regression": self._latest(s, "regression"),
                 "duplicate_of": triage.get("duplicate_of"),
                 "requested_focus": s.get("requested_focus"),
-            }
-        if stage == "review":
-            return {
-                **base,
-                "signal": s["signal"],
-                "signature": triage.get("signature"),
-                "rca": triage.get("rca", "unknown"),
-                "confidence": triage.get("confidence"),
-                "key_frames": triage.get("key_frames") or [],
-                "reproducible": repro.get("reproducible"),
-                "ticket_status": ticket.get("ticket_status"),
-                "ticket_sections": ticket.get("sections") or [],
-                "duplicate_of": ticket.get("duplicate_of") or triage.get("duplicate_of"),
-                "evidence_count": int(s.get("evidence_count", 0)),
-                "repro_attempted": "reproduction" in outputs,
-                "loop_seq": int(s.get("review_loop_seq", 0)) + 1,
-                "requested_focus": s.get("requested_focus"),
-            }
-        if stage == "reporting":
-            return {
-                "case_id": s["case_id"] if mode == "case" else None,
-                "day": None if mode == "case" else _today(),
             }
         raise ValueError(f"未知 stage: {stage}")
 
     async def drain(self) -> None:
         if self.tasks:
             await asyncio.gather(*list(self.tasks), return_exceptions=True)
-
-
-def _builtin(key: str, signal: str) -> Plan:
-    from .plan import builtin_plan
-
-    return builtin_plan(key, signal)
 
 
 def _today() -> str:

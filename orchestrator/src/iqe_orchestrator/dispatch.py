@@ -27,15 +27,6 @@ RESULT_STATUS_TO_RUN = {
     "expired": "expired",
 }
 
-ACTION_OF = {
-    "monitor": "scan",
-    "triage": "run",
-    "reproduction": "run",
-    "ticket": "run",
-    "review": "run",
-    "reporting": "case",
-}
-
 
 @dataclass
 class StepResult:
@@ -61,7 +52,7 @@ def _dlq_reason(env: dict | None, headers: dict, original_rk: str) -> str:
     try:
         import jsonschema
 
-        from iqe_orchestrator.common.agent_runtime import validate_stage_contract
+        from iqe_orchestrator.common.contracts import validate_stage_contract
 
         jsonschema.validate(
             instance=env.get("payload") or {},
@@ -119,7 +110,9 @@ class BusGateway:
         scenario_hint: str | None = None,
         timeout_s: float | None = None,
     ) -> StepResult:
-        action = ACTION_OF[stage] if stage != "reporting" else mode
+        # 8 个 Agent 一个部署单元、多个 mode：routing key 的第三段就是 mode，
+        # 拓扑 ci.cmd.<stage>.<mode>（schemas/stage-contracts.json 的 command_subject）。
+        action = mode
         # 契约形状（schemas/stage-contracts.json 为权威）：payload = {mode, input:{...}}
         envelope_payload = {"mode": mode, "input": payload}
         env = make_command(
@@ -236,10 +229,15 @@ class BusGateway:
         )
 
     async def publish_command_only(self, env: dict) -> None:
-        """故障注入用：直接往命令 exchange 投一条消息，不等结果。"""
+        """故障注入用：直接往命令 exchange 投一条消息，不等结果。
+
+        routing key 的 mode 段必须取 payload.mode：信封没有顶层 mode 字段，
+        用 env.get("mode") 会永远退化成 "run"，DLQ 的 original_routing_key 就丢了分支信息。
+        """
+        mode = (env.get("payload") or {}).get("mode") or env.get("mode") or "run"
         await self.bus.publish(
             bus_mod.CMD_EXCHANGE,
-            f"ci.cmd.{env['stage']}.{ACTION_OF[env['stage']]}",
+            f"ci.cmd.{env['stage']}.{mode}",
             env,
             message_id=env["msg_id"],
             correlation_id=env["correlation_id"],

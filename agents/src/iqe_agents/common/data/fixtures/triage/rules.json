@@ -11,20 +11,33 @@
     "timeout": "environment",
     "unknown": "unknown"
   },
+  "path_by_component": {
+    "ci-infra": "internal",
+    "test": "internal",
+    "toolchain": "internal",
+    "apt-repo": "internal",
+    "install": "internal",
+    "image-build": "external",
+    "driver": "external",
+    "network": "external",
+    "timeout": "external",
+    "unknown": "external"
+  },
+  "confidence_by_component": {
+    "driver": 0.82,
+    "test": 0.76,
+    "environment": 0.72,
+    "infrastructure": 0.88,
+    "unknown": 0.3
+  },
   "os_stage_map": {
     "os-staging-image": "staging-image-build",
     "os-staging-install": "staging-install",
     "os-staging-boot": "staging-boot",
     "os-staging-test": "staging-test"
   },
-  "confidence_by_component": {
-    "driver": 0.82,
-    "test": 0.76,
-    "environment": 0.68,
-    "infrastructure": 0.88,
-    "unknown": 0.3
-  },
   "no_repro_rca": [
     "infrastructure"
-  ]
+  ],
+  "default_path": "external"
 }

@@ -1,0 +1,18 @@
+{
+  "check": {
+    "is_regression": false,
+    "baseline": "staging-pass-2026-11-24",
+    "change_window": "a1b2c3d..f4e5d6a",
+    "candidates": [],
+    "notes": [
+      "同配置历史基线同样失败，判定为长期存在的环境问题，不是回归"
+    ]
+  },
+  "bisect": {
+    "bisected": false,
+    "guilty_patch": null,
+    "notes": [
+      "非回归，不进入二分"
+    ]
+  }
+}

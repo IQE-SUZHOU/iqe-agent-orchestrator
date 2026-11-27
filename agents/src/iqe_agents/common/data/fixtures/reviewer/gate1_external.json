@@ -1,0 +1,8 @@
+{
+  "gate1": {
+    "verdict": "approve",
+    "decision": "external",
+    "reason_code": "ok",
+    "notes": "产品侧缺陷，走外部路径（复现取证 → 回归判定 → 建单）"
+  }
+}

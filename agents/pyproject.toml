@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "iqe-agents"
 version = "0.2.0"
-description = "IQE CI 分诊的 6 个 Mock Agent：monitor / triage / reproduction / ticket / review / reporting"
+description = "IQE CI 分诊的 8 个 Mock Agent：monitor / triage / reviewer / remediation / reproduction / regression / ticketing / reporting"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "LicenseRef-Proprietary"          # SPDX 表达式（内部演示，非开源）
@@ -27,11 +27,13 @@ dev = ["pytest==9.2.0", "ruff>=0.17", "black>=25", "isort>=6", "mypy>=1.18"]
 [project.scripts]
 ci-agent-monitor = "iqe_agents.monitor.main:main"
 ci-agent-triage = "iqe_agents.triage.main:main"
+ci-agent-reviewer = "iqe_agents.reviewer.main:main"
+ci-agent-remediation = "iqe_agents.remediation.main:main"
 ci-agent-reproduction = "iqe_agents.reproduction.main:main"
-ci-agent-ticket = "iqe_agents.ticket.main:main"
-ci-agent-review = "iqe_agents.review.main:main"
+ci-agent-regression = "iqe_agents.regression.main:main"
+ci-agent-ticketing = "iqe_agents.ticketing.main:main"
 ci-agent-reporting = "iqe_agents.reporting.main:main"
-ci-selfcheck = "iqe_agents.tools.selfcheck:main"
+ci-selfcheck = "iqe_agents.tools.selfcheck:cli"
 
 [project.urls]
 Repository = "https://github.com/IQE-SUZHOU/iqe-agent-orchestrator"

@@ -1,0 +1,11 @@
+{
+  "fixed": false,
+  "change_type": "script",
+  "target": "ci/scripts/os_staging_test.sh",
+  "diff_summary": "未找到可复用的修复：日志只覆盖到用例入口，需要产品侧确认预期行为",
+  "work_item_key": null,
+  "risk": "high",
+  "notes": [
+    "脚本内没有可安全修改的位置，转人工"
+  ]
+}

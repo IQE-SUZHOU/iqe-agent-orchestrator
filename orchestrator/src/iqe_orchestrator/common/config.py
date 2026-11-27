@@ -65,7 +65,7 @@ class Config:
     stage_timeout_s: float = field(default_factory=lambda: _f("STAGE_TIMEOUT_S", 30.0))
     stage_max_attempts: int = field(default_factory=lambda: _i("STAGE_MAX_ATTEMPTS", 2))
     max_review_loops: int = field(default_factory=lambda: _i("MAX_REVIEW_LOOPS", 2))
-    max_plan_steps: int = field(default_factory=lambda: _i("MAX_PLAN_STEPS", 8))
+    max_plan_steps: int = field(default_factory=lambda: _i("MAX_PLAN_STEPS", 24))
     orch_prefetch: int = field(default_factory=lambda: _i("ORCH_PREFETCH", 64))
     max_inflight_cases: int = field(default_factory=lambda: _i("MAX_INFLIGHT_CASES", 4))
     recursion_limit: int = field(default_factory=lambda: _i("RECURSION_LIMIT", 40))
@@ -76,7 +76,7 @@ class Config:
     plan_llm_endpoint: str = field(default_factory=lambda: _s("PLAN_LLM_ENDPOINT", ""))
     plan_model: str = field(default_factory=lambda: _s("PLAN_MODEL", "mock-planner/v1"))
     plan_mock_enabled: bool = field(default_factory=lambda: _b("MOCK_LLM_ENABLED", True))
-    plan_mock_scenario: str = field(default_factory=lambda: _s("PLAN_MOCK_SCENARIO", "warming_ok"))
+    plan_mock_scenario: str = field(default_factory=lambda: _s("PLAN_MOCK_SCENARIO", "internal_ok"))
     plan_ctx_chars: int = field(default_factory=lambda: _i("PLAN_CTX_CHARS", 1200))
 
     # --- 调度 ---

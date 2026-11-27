@@ -1,0 +1,27 @@
+{
+  "check": {
+    "is_regression": true,
+    "baseline": "missing",
+    "change_window": "unknown",
+    "candidates": [
+      {
+        "commit": "a1b2c3d",
+        "title": "kmod: 初始化 smu_ops"
+      },
+      {
+        "commit": "b2c3d4e",
+        "title": "ci: 调整 staging 安装顺序"
+      }
+    ],
+    "notes": [
+      "基线缺失，只能按最近变更区间猜"
+    ]
+  },
+  "bisect": {
+    "bisected": false,
+    "guilty_patch": null,
+    "notes": [
+      "二分未收敛（区间内两次构建都失败）"
+    ]
+  }
+}

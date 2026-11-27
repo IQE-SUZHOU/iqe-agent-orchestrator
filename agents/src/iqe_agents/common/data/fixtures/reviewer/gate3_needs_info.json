@@ -1,0 +1,11 @@
+{
+  "gate3": {
+    "verdict": "needs_info",
+    "reason_code": "missing_ticket_sections",
+    "requested_info": [
+      "补充影响面（哪些机型/配置）",
+      "确认 guilty patch 的责任人"
+    ],
+    "notes": "工单缺影响面章节"
+  }
+}

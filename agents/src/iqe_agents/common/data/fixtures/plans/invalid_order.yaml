@@ -1,0 +1,15 @@
+plan_id: "01JB9ZK3Q8W7X8Y9Z0A1B2C3D8"
+version: 1
+source: llm
+workflow_key: null
+degraded: false
+created_at: "2026-11-25T10:15:00Z"
+scope: case
+signal: error
+rationale: "故意非法：没有闸门 1 就直接报告（V4 必须拒绝）"
+model: "mock-planner"
+confidence: 0.55
+steps:
+  - {id: t1, stage: triage, mode: classify}
+  - {id: p1, stage: reporting, mode: case}
+validator: "plan-validator/v1"
