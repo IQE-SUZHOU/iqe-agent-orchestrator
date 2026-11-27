@@ -7,6 +7,11 @@ cd "$(dirname "$0")/.."
 PY="${PY:-../.venv/bin/python}"
 NS=ci-triage
 
+# 阶段名单从清单里反解，避免脚本与 Deployment 漂移（曾经就漂过一次：review → reviewer）。
+STAGES="${STAGES:-$(grep -hoE 'command: \["ci-agent-[a-z]+"\]' deploy/k8s/21-agents.yaml |
+                    sed -E 's/.*ci-agent-([a-z]+)".*/\1/' | sort -u | tr '\n' ' ')}"
+[ -n "${STAGES// /}" ] || { echo "无法从 deploy/k8s/21-agents.yaml 解析阶段名单"; exit 1; }
+
 # ── 凭据只从 deploy/secrets.env 读（该文件已 .gitignore，仓库里不留明文）──
 SECRETS_ENV="${SECRETS_ENV:-deploy/secrets.env}"
 if [ -f "$SECRETS_ENV" ]; then
@@ -14,7 +19,7 @@ if [ -f "$SECRETS_ENV" ]; then
   echo "== 0) 已载入 $SECRETS_ENV"
 fi
 : "${PG_PASSWORD:?缺少 PG_PASSWORD：cp deploy/secrets.env.example deploy/secrets.env 后填真实值}"
-: "${CI_APP_PASS:?缺少 CI_APP_PASS（本系统 7 个 MQ 账号共用的口令）}"
+: "${CI_APP_PASS:?缺少 CI_APP_PASS（编排层 + 8 个 Agent 共 9 个 MQ 账号共用的口令）}"
 : "${RABBITMQ_ADMIN_PASS:?缺少 RABBITMQ_ADMIN_PASS}"
 : "${HARBOR_USER:?缺少 HARBOR_USER}"
 : "${HARBOR_PASS:?缺少 HARBOR_PASS}"
@@ -41,7 +46,7 @@ docker build -t "$REPO:$TAG" .
 docker push "$REPO:$TAG"
 echo "digest: $(docker inspect --format='{{index .RepoDigests 0}}' "$REPO:$TAG")"
 
-echo "== 3) 前置：vhost /ci + 7 个账号 + 目标数据库"
+echo "== 3) 前置：vhost /ci + 1 编排账号 + $(echo $STAGES | wc -w) 个 Agent 账号 + 目标数据库"
 kubectl -n infra-database port-forward svc/rabbitmq 15690:15672 >/dev/null 2>&1 &
 PF=$!; trap 'kill $PF 2>/dev/null || true' EXIT; sleep 2
 $PY -m iqe_orchestrator.tools.setup_broker --mgmt http://127.0.0.1:15690
@@ -55,7 +60,7 @@ CREDS=$(mktemp)
 {
   echo "PG_DSN=postgresql://postgres:${PG_PASSWORD}@${PG_CLUSTER_HOST}:${PG_PORT}/ci_triage"
   echo "AMQP_ORCH=amqp://ci_orch:${CI_APP_PASS}@${AMQP_HOST}:${AMQP_PORT}/ci"
-  for s in monitor triage reproduction ticket review reporting; do
+  for s in $STAGES; do
     echo "AMQP_${s^^}=amqp://ci_agent_${s}:${CI_APP_PASS}@${AMQP_HOST}:${AMQP_PORT}/ci"
   done
 } > "$CREDS"
@@ -69,8 +74,18 @@ for f in deploy/k8s/*.yaml; do sed "s|IMAGE_TAG|$TAG|g" "$f" > "$TMP/$(basename 
 kubectl apply -f "$TMP/00-infra.yaml"
 kubectl apply -f "$TMP/20-orchestrator.yaml"
 kubectl apply -f "$TMP/21-agents.yaml"
+# 先清掉上一代遗留的 Agent Deployment：阶段改名（review → reviewer、ticket → ticketing）后，
+# 旧 Deployment 会拿新镜像跑已经不存在的模块，CrashLoop 之外还会抢旧队列。
+for d in $(kubectl -n "$NS" get deploy -l app=ci-triage-agent -o jsonpath='{.items[*].metadata.name}'); do
+  stage="${d#agent-}"
+  case " $STAGES " in
+    *" $stage "*) ;;
+    *) echo "  删除遗留 Deployment $d"; kubectl -n "$NS" delete deploy "$d" --wait=false ;;
+  esac
+done
+
 kubectl -n "$NS" rollout status deployment/orchestrator --timeout=240s
-for s in monitor triage reproduction ticket review reporting; do
+for s in $STAGES; do
   kubectl -n "$NS" rollout status deployment/agent-"$s" --timeout=240s
 done
 
@@ -78,4 +93,4 @@ echo "== 6) 当前镜像（回滚锚点，请记下 digest）"
 kubectl -n "$NS" get deploy -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image
 echo "UI  http://172.31.0.3:30099/"
 echo "API http://172.31.0.3:30099/api/cases"
-echo "跑端到端：ORCH_BASE_URL=http://172.31.0.3:30099 PG_DSN=$PG_ADMIN $PY -m pytest tests -q"
+echo "跑端到端：ORCH_BASE_URL=http://172.31.0.3:30099 PG_DSN=$PG_ADMIN $PY -m pytest -m integration -q"

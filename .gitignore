@@ -22,3 +22,6 @@ logs/
 deploy/secrets.env
 *.local.env
 .env
+
+# 已知口令黑名单（本机私有）
+deploy/secret_denylist.txt

@@ -9,11 +9,10 @@
 
 from __future__ import annotations
 
+import pytest
 import yaml
 
 from iqe_orchestrator.common.config import cfg
-import pytest
-
 from iqe_orchestrator.plan import (
     LLMPlanner,
     PlanResolver,
@@ -42,7 +41,7 @@ def _steps(plan) -> list[tuple[str, str]]:
 # --------------------------------------------------------------------- 注册表匹配
 def test_registry_has_builtin_workflows():
     r = _resolver()
-    assert BUILTIN_KEYS <= set(r.workflows)
+    assert set(r.workflows) >= BUILTIN_KEYS
 
 
 def test_error_signal_matches_full_workflow():
