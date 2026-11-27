@@ -154,7 +154,7 @@ bash deploy/deploy.sh     # selfcheck → 打镜像 → 推 Harbor → 建 Secre
 用于没有中间件的机器上「一条命令看完整流水线」：
 
 ```bash
-bash deploy/build_allinone.sh                    # 构建并推 Harbor：iqe-agent-orchestrator/ci-triage-allinone
+bash deploy/build_allinone.sh                    # 构建并推 Harbor：iqe-agent-orchestrator/iqe-agent-orchestrator-allinone
 docker run -d -p 18080:8080 <image>              # 起 PG/MQ/9 进程，等 /readyz
 curl -s -XPOST localhost:18080/api/scan -H 'content-type: application/json' \
   -d '{"scenario":"new_failure","wait":true}'

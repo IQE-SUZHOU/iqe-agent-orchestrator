@@ -19,7 +19,7 @@ RabbitMQ 账号沿用星型权限模型：`ci_orch` + `ci_agent_<stage>` 共 9 �
 ## 2. 构建 / 推送
 
 ```bash
-# 构建 + 推 Harbor（默认 iqe-agent-orchestrator/ci-triage-allinone）
+# 构建 + 推 Harbor（默认 iqe-agent-orchestrator/iqe-agent-orchestrator-allinone）
 bash deploy/build_allinone.sh
 
 # 只构建、指定 tag
@@ -33,7 +33,7 @@ PUSH=0 TAG=local-dev bash deploy/build_allinone.sh
 ```bash
 docker run -d --name ci-allinone \
   -p 18080:8080 -p 15672:15672 \
-  172.31.0.3:7777/iqe-agent-orchestrator/ci-triage-allinone:latest
+  172.31.0.3:7777/iqe-agent-orchestrator/iqe-agent-orchestrator-allinone:latest
 
 # 就绪（9 个进程 + 迁移全部完成）
 curl -s localhost:18080/readyz

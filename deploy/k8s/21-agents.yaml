@@ -45,7 +45,7 @@ spec:
                       - dell-r7625   # 实测：Harbor 可拉 + 无 DiskPressure（jsd 有磁盘压力会被驱逐）
       containers:
         - name: agent-monitor
-          image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
+          image: 172.31.0.3:7777/iqe-agent-orchestrator/iqe-agent-orchestrator:IMAGE_TAG
           command: ["ci-agent-monitor"]
           envFrom:
             - configMapRef:
@@ -133,7 +133,7 @@ spec:
                       - dell-r7625   # 实测：Harbor 可拉 + 无 DiskPressure（jsd 有磁盘压力会被驱逐）
       containers:
         - name: agent-triage
-          image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
+          image: 172.31.0.3:7777/iqe-agent-orchestrator/iqe-agent-orchestrator:IMAGE_TAG
           command: ["ci-agent-triage"]
           envFrom:
             - configMapRef:
@@ -221,7 +221,7 @@ spec:
                       - dell-r7625   # 实测：Harbor 可拉 + 无 DiskPressure（jsd 有磁盘压力会被驱逐）
       containers:
         - name: agent-reviewer
-          image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
+          image: 172.31.0.3:7777/iqe-agent-orchestrator/iqe-agent-orchestrator:IMAGE_TAG
           command: ["ci-agent-reviewer"]
           envFrom:
             - configMapRef:
@@ -309,7 +309,7 @@ spec:
                       - dell-r7625   # 实测：Harbor 可拉 + 无 DiskPressure（jsd 有磁盘压力会被驱逐）
       containers:
         - name: agent-remediation
-          image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
+          image: 172.31.0.3:7777/iqe-agent-orchestrator/iqe-agent-orchestrator:IMAGE_TAG
           command: ["ci-agent-remediation"]
           envFrom:
             - configMapRef:
@@ -397,7 +397,7 @@ spec:
                       - dell-r7625   # 实测：Harbor 可拉 + 无 DiskPressure（jsd 有磁盘压力会被驱逐）
       containers:
         - name: agent-reproduction
-          image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
+          image: 172.31.0.3:7777/iqe-agent-orchestrator/iqe-agent-orchestrator:IMAGE_TAG
           command: ["ci-agent-reproduction"]
           envFrom:
             - configMapRef:
@@ -487,7 +487,7 @@ spec:
                       - dell-r7625   # 实测：Harbor 可拉 + 无 DiskPressure（jsd 有磁盘压力会被驱逐）
       containers:
         - name: agent-regression
-          image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
+          image: 172.31.0.3:7777/iqe-agent-orchestrator/iqe-agent-orchestrator:IMAGE_TAG
           command: ["ci-agent-regression"]
           envFrom:
             - configMapRef:
@@ -575,7 +575,7 @@ spec:
                       - dell-r7625   # 实测：Harbor 可拉 + 无 DiskPressure（jsd 有磁盘压力会被驱逐）
       containers:
         - name: agent-ticketing
-          image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
+          image: 172.31.0.3:7777/iqe-agent-orchestrator/iqe-agent-orchestrator:IMAGE_TAG
           command: ["ci-agent-ticketing"]
           envFrom:
             - configMapRef:
@@ -665,7 +665,7 @@ spec:
                       - dell-r7625   # 实测：Harbor 可拉 + 无 DiskPressure（jsd 有磁盘压力会被驱逐）
       containers:
         - name: agent-reporting
-          image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
+          image: 172.31.0.3:7777/iqe-agent-orchestrator/iqe-agent-orchestrator:IMAGE_TAG
           command: ["ci-agent-reporting"]
           envFrom:
             - configMapRef:

@@ -3,8 +3,8 @@
 # 用途：给实现人员/评审「docker run 一条命令就能跑完整 12 阶段流水线」的环境，
 # 不需要连集群里的 infra-database（PG / MQ 都在容器内）。
 #
-#   docker build -f deploy/allinone/Dockerfile -t ci-triage-allinone:dev .
-#   docker run -d -p 18080:8080 -p 15672:15672 --name ci-allinone ci-triage-allinone:dev
+#   docker build -f deploy/allinone/Dockerfile -t iqe-agent-orchestrator-allinone:dev .
+#   docker run -d -p 18080:8080 -p 15672:15672 --name ci-allinone iqe-agent-orchestrator-allinone:dev
 #
 # 注意：镜像内跑的是 mock 剧本 + 演示口令（默认 ci-demo-pass），仅供演示/参考，
 # 不要当作生产镜像使用（生产请用根目录 Dockerfile：无状态进程 + 外部 PG/MQ）。

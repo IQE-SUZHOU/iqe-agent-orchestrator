@@ -14,13 +14,42 @@ if [ -f "$SECRETS_ENV" ]; then
   set -a; . "$SECRETS_ENV"; set +a
 fi
 : "${CI_APP_PASS:?缺少 CI_APP_PASS：cp deploy/secrets.env.example deploy/secrets.env 后填真实值}"
-: "${PG_PASSWORD:?缺少 PG_PASSWORD（同上）}"
+: "${PG_APP_PASS:?缺少 PG_APP_PASS（本系统专属库角色口令，同上）}"
 AMQP_HOST="${AMQP_HOST_LOCAL:-10.100.200.12:5672}"
 AMQP_PASS="${AMQP_PASS:-$CI_APP_PASS}"
-PG_DSN="${PG_DSN:-postgresql://postgres:${PG_PASSWORD}@10.96.75.0:5432/ci_triage}"
+# 业务连库用专属角色，不用集群共享的 postgres 超户
+PG_DSN="${PG_DSN:-postgresql://${PG_APP_USER:-ci_triage_app}:${PG_APP_PASS}@10.96.75.0:5432/ci_triage}"
 LOG_DIR="${LOG_DIR:-$HERE/.run}"
 ORCH_PORT="${ORCH_PORT:-8080}"
 mkdir -p "$LOG_DIR"
+
+ports=(monitor:8101 triage:8102 reviewer:8103 remediation:8104 reproduction:8105
+       regression:8106 ticketing:8107 reporting:8108)
+
+# 端口预检：上一轮没退干净时，宁可在这里报清楚是谁占着，也不要让编排层 bind 失败
+# 之后被看门狗连锁杀掉整栈（那种失败现象是「8 个 agent 莫名其妙全没了」）。
+port_free() {
+  "$VENV" -c "
+import socket, sys
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind(('0.0.0.0', $1)); s.close()
+except OSError:
+    sys.exit(1)
+" 2>/dev/null
+}
+busy=""
+for p in "$ORCH_PORT" "${ports[@]##*:}"; do
+  port_free "$p" || busy="$busy $p"
+done
+if [ -n "$busy" ]; then
+  echo "[run_local] 端口已被占用：$busy"
+  for p in $busy; do
+    ss -ltnp 2>/dev/null | awk -v pat=":$p\$" '$4 ~ pat { print "           " $0 }'
+  done
+  echo "[run_local] 先停掉上一轮：kill \$(cat $LOG_DIR/*.pid) 2>/dev/null; 或 pkill -f 'iqe_orchestrator.main|iqe_agents'"
+  exit 1
+fi
 
 amqp() { echo "amqp://$1:$AMQP_PASS@$AMQP_HOST/ci"; }
 
@@ -49,8 +78,6 @@ for i in $(seq 1 60); do
   sleep 1
 done
 
-ports=(monitor:8101 triage:8102 reviewer:8103 remediation:8104 reproduction:8105
-       regression:8106 ticketing:8107 reporting:8108)
 for entry in "${ports[@]}"; do
   stage="${entry%%:*}"; port="${entry##*:}"
   echo "[run_local] 2) agent $stage :$port"
@@ -62,7 +89,7 @@ done
 sleep 4
 echo "[run_local] 全部进程已启动，日志在 $LOG_DIR/"
 echo "[run_local] UI: http://127.0.0.1:$ORCH_PORT/   API base: http://127.0.0.1:$ORCH_PORT"
-echo "[run_local] 跑测试：ORCH_BASE_URL=http://127.0.0.1:$ORCH_PORT PG_DSN=$PG_DSN $VENV -m pytest tests -q"
+echo "[run_local] 跑测试：set -a; . deploy/secrets.env; set +a; ORCH_BASE_URL=http://127.0.0.1:$ORCH_PORT $VENV -m pytest tests -q"
 
 while true; do
   for entry in orchestrator monitor triage reviewer remediation reproduction regression ticketing reporting; do

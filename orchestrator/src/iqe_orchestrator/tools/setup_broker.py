@@ -15,6 +15,9 @@ import urllib.parse
 
 import requests
 
+# dry-run / 摘要里一律用它替口令：这个工具的输出经常被贴进终端记录和 CI 日志。
+_REDACTED = "<redacted>"
+
 STAGES = [
     "monitor",
     "triage",
@@ -113,7 +116,9 @@ def main() -> int:
 
     for kind, path, body in steps:
         if a.dry_run:
-            print(f"[dry-run] PUT {path} {json.dumps(body, ensure_ascii=False)}")
+            # 口令一律不落终端：dry-run 只展示账号结构
+            shown = {**body, "password": _REDACTED} if "password" in body else body
+            print(f"[dry-run] PUT {path} {json.dumps(shown, ensure_ascii=False)}")
             continue
         code, text = put(sess, base + path, body)
         flag = "OK" if code in (201, 204) else "FAIL"
@@ -122,11 +127,12 @@ def main() -> int:
             return 1
 
     if not a.dry_run:
-        print("\nAMQP URLs（写进 K8s Secret）：")
+        # 只打印结构，不打印口令：口令在 deploy/secrets.env，K8s Secret 由 deploy/deploy.sh 生成。
+        print("\nAMQP URLs（口令取自环境变量 CI_APP_PASS，不在此回显）：")
         host = "rabbitmq.infra-database.svc.cluster.local"
-        print(f"  AMQP_ORCH=amqp://ci_orch:{a.app_pass}@{host}:5672/{v}")
+        print(f"  AMQP_ORCH=amqp://ci_orch:${{CI_APP_PASS}}@{host}:5672/{v}")
         for s in STAGES:
-            print(f"  AMQP_{s.upper()}=amqp://ci_agent_{s}:{a.app_pass}@{host}:5672/{v}")
+            print(f"  AMQP_{s.upper()}=amqp://ci_agent_{s}:${{CI_APP_PASS}}@{host}:5672/{v}")
     return 0
 
 

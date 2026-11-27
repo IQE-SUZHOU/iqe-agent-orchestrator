@@ -32,15 +32,26 @@ else
 fi
 
 bad=0
+# 不带参数时必须自己扫全仓，否则「直接跑一下」永远绿灯（这个洞曾经让口令写进文档也没报）。
+if [ "$#" -eq 0 ]; then
+  if git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    mapfile -t _files < <(git -C "$ROOT" ls-files)
+  else
+    mapfile -t _files < <(cd "$ROOT" && find . -type f -not -path './.git/*' | sed 's|^\./||')
+  fi
+  set -- "${_files[@]}"
+fi
 for f in "$@"; do
-  [ -f "$f" ] || continue
-  case "$f" in
+  case "$f" in /*) abs="$f" ;; *) abs="$ROOT/$f" ;; esac
+  [ -f "$abs" ] || continue
+  rel="${abs#"$ROOT"/}"
+  case "$rel" in
     deploy/secrets.env|deploy/secrets.env.example|deploy/secret_denylist.txt|scripts/check_secrets.sh) continue ;;
   esac
   for p in "${PATTERNS[@]}"; do
-    if grep -nE "$p" "$f" >/dev/null 2>&1; then
-      echo "  ✗ $f 命中可疑凭据模式：$p" >&2
-      grep -nE "$p" "$f" | head -3 | sed 's/^/      /' >&2
+    if grep -nE "$p" "$abs" >/dev/null 2>&1; then
+      echo "  ✗ $rel 命中可疑凭据模式：$p" >&2
+      grep -nE "$p" "$abs" | head -3 | sed 's/^/      /' >&2
       bad=1
     fi
   done

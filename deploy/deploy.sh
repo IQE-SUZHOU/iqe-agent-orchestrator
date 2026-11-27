@@ -18,19 +18,26 @@ if [ -f "$SECRETS_ENV" ]; then
   set -a; . "$SECRETS_ENV"; set +a
   echo "== 0) 已载入 $SECRETS_ENV"
 fi
-: "${PG_PASSWORD:?缺少 PG_PASSWORD：cp deploy/secrets.env.example deploy/secrets.env 后填真实值}"
+: "${PG_APP_USER:?缺少 PG_APP_USER：cp deploy/secrets.env.example deploy/secrets.env 后填真实值}"
+: "${PG_APP_PASS:?缺少 PG_APP_PASS（本系统专属库角色口令）}"
 : "${CI_APP_PASS:?缺少 CI_APP_PASS（编排层 + 8 个 Agent 共 9 个 MQ 账号共用的口令）}"
 : "${RABBITMQ_ADMIN_PASS:?缺少 RABBITMQ_ADMIN_PASS}"
 : "${HARBOR_USER:?缺少 HARBOR_USER}"
 : "${HARBOR_PASS:?缺少 HARBOR_PASS}"
 REGISTRY="${HARBOR_REGISTRY:-172.31.0.3:7777}"
-REPO="${REPO:-$REGISTRY/library/ci-triage}"
+# 镜像放在独立项目 ci-triage 下（不用 library：那是共享项目，且推送凭证会波及别人的镜像）
+REPO="${REPO:-$REGISTRY/iqe-agent-orchestrator/iqe-agent-orchestrator}"
 PG_CLUSTER_HOST="${PG_CLUSTER_HOST:-postgres.infra-database.svc.cluster.local}"
 PG_PORT="${PG_PORT:-5432}"
 AMQP_HOST="${AMQP_HOST:-rabbitmq.infra-database.svc.cluster.local}"
 AMQP_PORT="${AMQP_PORT:-5672}"
 # 本机直连 Postgres 只能走 ClusterIP 10.96.75.0（172.31.0.3:5432 被 pg_hba 拒绝）
-PG_ADMIN="${PG_ADMIN:-postgresql://postgres:${PG_PASSWORD}@10.96.75.0:5432/ci_triage}"
+# 业务一律用专属角色 PG_APP_USER；PG_ADMIN（超户）只在 ci_triage 库尚不存在时用来建库，可选。
+PG_ADMIN="${PG_ADMIN:-postgresql://postgres:${PG_PASSWORD:-}@10.96.75.0:5432/ci_triage}"
+# 写进 k8s Secret 的连接串（集群内 Service 域名）
+PG_APP_DSN="${PG_APP_DSN:-postgresql://${PG_APP_USER}:${PG_APP_PASS}@${PG_CLUSTER_HOST}:${PG_PORT}/ci_triage}"
+# 本机建库建表用的连接串（同一个库，走 ClusterIP）
+PG_APP_DSN_LOCAL="${PG_APP_DSN_LOCAL:-postgresql://${PG_APP_USER}:${PG_APP_PASS}@10.96.75.0:5432/ci_triage}"
 # 镜像 tag = 时间 + git 短 sha + 构建内容哈希。
 # 内容哈希是必需的：同 tag 重推时节点上的旧镜像缓存不会失效（Harbor 同 tag 覆盖不通知 kubelet）。
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo nogit)$(git diff --quiet 2>/dev/null || echo -dirty)"
@@ -41,7 +48,8 @@ echo "== 1) 离线自检（不需要 broker / DB）"
 $PY -m iqe_agents.tools.selfcheck
 $PY -c "import iqe_orchestrator.app, iqe_orchestrator.graph, iqe_agents.runtime; print('import OK')"
 
-echo "== 2) 构建并推送镜像"
+echo "== 2) 构建并推送镜像（$REPO，推送账号 $HARBOR_USER）"
+printf '%s' "$HARBOR_PASS" | docker login "$REGISTRY" -u "$HARBOR_USER" --password-stdin >/dev/null
 docker build -t "$REPO:$TAG" .
 docker push "$REPO:$TAG"
 echo "digest: $(docker inspect --format='{{index .RepoDigests 0}}' "$REPO:$TAG")"
@@ -50,7 +58,9 @@ echo "== 3) 前置：vhost /ci + 1 编排账号 + $(echo $STAGES | wc -w) 个 Ag
 kubectl -n infra-database port-forward svc/rabbitmq 15690:15672 >/dev/null 2>&1 &
 PF=$!; trap 'kill $PF 2>/dev/null || true' EXIT; sleep 2
 $PY -m iqe_orchestrator.tools.setup_broker --mgmt http://127.0.0.1:15690
+# 建库需要超户（库已存在时这步只是确认）；建表用专属角色，跑在本机 ClusterIP 连接上。
 PG_DSN="$PG_ADMIN" $PY -c "import asyncio; from iqe_orchestrator.migrate import ensure_database; asyncio.run(ensure_database())"
+PG_DSN="$PG_APP_DSN_LOCAL" $PY -m iqe_orchestrator.migrate
 
 echo "== 4) 生成 Secret（凭证来源：deploy/secrets.env）"
 kubectl -n "$NS" create secret docker-registry harbor-pull \
@@ -58,7 +68,7 @@ kubectl -n "$NS" create secret docker-registry harbor-pull \
   --dry-run=client -o yaml | kubectl apply -f -
 CREDS=$(mktemp)
 {
-  echo "PG_DSN=postgresql://postgres:${PG_PASSWORD}@${PG_CLUSTER_HOST}:${PG_PORT}/ci_triage"
+  echo "PG_DSN=$PG_APP_DSN"
   echo "AMQP_ORCH=amqp://ci_orch:${CI_APP_PASS}@${AMQP_HOST}:${AMQP_PORT}/ci"
   for s in $STAGES; do
     echo "AMQP_${s^^}=amqp://ci_agent_${s}:${CI_APP_PASS}@${AMQP_HOST}:${AMQP_PORT}/ci"
@@ -93,4 +103,5 @@ echo "== 6) 当前镜像（回滚锚点，请记下 digest）"
 kubectl -n "$NS" get deploy -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image
 echo "UI  http://172.31.0.3:30099/"
 echo "API http://172.31.0.3:30099/api/cases"
-echo "跑端到端：ORCH_BASE_URL=http://172.31.0.3:30099 PG_DSN=$PG_ADMIN $PY -m pytest -m integration -q"
+echo "跑端到端：set -a; . deploy/secrets.env; set +a; ORCH_BASE_URL=http://172.31.0.3:30099 \$PY -m pytest -m integration -q"
+echo "（PG_DSN 由 secrets.env 提供，已指向专属角色 $PG_APP_USER，不再用超户）"

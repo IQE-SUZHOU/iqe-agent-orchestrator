@@ -35,7 +35,7 @@ spec:
         fsGroup: 999
       containers:
         - name: allinone
-          image: 172.31.0.3:7777/iqe-agent-orchestrator/ci-triage-allinone:IMAGE_TAG
+          image: 172.31.0.3:7777/iqe-agent-orchestrator/iqe-agent-orchestrator-allinone:IMAGE_TAG
           imagePullPolicy: IfNotPresent
           ports:
             - { name: http, containerPort: 8080 }

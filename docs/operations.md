@@ -29,6 +29,7 @@ Agent 之间**只通过 RabbitMQ 通信**，编排层用**封存计划**驱动�
 ```bash
 cd /home/amd/sut-target-os/python_langraph_os_demo/code
 VENV=../.venv/bin/python
+cp deploy/secrets.env.example deploy/secrets.env && chmod 600 deploy/secrets.env   # 填真实口令，见 §11
 
 # 1) 建 vhost / 8 个 Agent 账号 / 权限（幂等，可反复跑）+ 建库（自动跑 migrations）
 $VENV -m iqe_orchestrator.tools.setup_broker --mgmt http://127.0.0.1:15672
@@ -42,15 +43,20 @@ open http://127.0.0.1:8080/            # Case 列表 + 封存计划 + 实时进�
 curl -s http://127.0.0.1:8080/api/scenarios | $VENV -m json.tool
 
 # 4) 端到端验收（覆盖 19 个 ci_feed 场景）
-ORCH_BASE_URL=http://127.0.0.1:8080 PG_DSN="$PG_DSN" $VENV -m pytest -m integration -q
+set -a; . deploy/secrets.env; set +a
+ORCH_BASE_URL=http://127.0.0.1:8080 $VENV -m pytest -m integration -q
 ```
 
 本机端口：编排层 `8080`；Agent `8101..8108` =
 `monitor / triage / reviewer / remediation / reproduction / regression / ticketing / reporting`
 （只暴露 `/healthz`，没有业务 HTTP）。
 
+`run_local.sh` 启动前会**预检这 9 个端口**：上一轮没退干净时直接报出被占用的端口和进程，
+而不是让编排层 bind 失败后被看门狗连锁杀掉整栈。
+
 `run_local.sh` 默认连：RabbitMQ `10.100.200.12:5672`（集群 `infra-database/rabbitmq`）、
 Postgres `10.96.75.0:5432`（`infra-database/postgres`）。可用 `AMQP_HOST_LOCAL` / `PG_DSN` / `ORCH_PORT` 覆盖。
+连库用**本系统专属角色** `ci_triage_app`，不用集群共享的 `postgres` 超户（见 §11）。
 
 离线自检（不连 MQ；`graph_smoke` 只要一个 Postgres 存 checkpoint）：
 
@@ -255,14 +261,19 @@ bash deploy/deploy.sh            # selfcheck → 打镜像 → 推 Harbor → �
 * 镜像 tag 用 **内容哈希**（`YYYYMMDD-HHMM-<sha256(所有文件)>`）而不是 git hash：
   `python_langraph_os_demo/` 在 git 里是未跟踪目录，`git rev-parse --short HEAD` 恒定不变，
   同 tag 重推会让 Harbor / 节点用旧缓存。部署结束会打印 digest，作为回滚锚点。
-* 拉取用 `imagePullSecrets: harbor-pull`；只复用集群现有 `infra-database/{rabbitmq,postgres}`
-  （集群内 `rabbitmq.infra-database.svc.cluster.local:5672`、`postgres...:5432`；
-  本机脚本走 ClusterIP `10.100.200.12` / `10.96.75.0`，见第 9 节）。
+* 镜像放在 Harbor 独立项目 **`iqe-agent-orchestrator`**（私有）：主镜像
+  `172.31.0.3:7777/iqe-agent-orchestrator/iqe-agent-orchestrator:<tag>`。不用共享项目 `library`，
+  这样推送凭证是项目级 robot，波及面只有本项目（见 §11）。
+* 拉取用 `imagePullSecrets: harbor-pull`（由 `deploy.sh` 用 robot 账号生成）；只复用集群现有
+  `infra-database/{rabbitmq,postgres}`（集群内 `rabbitmq.infra-database.svc.cluster.local:5672`、
+  `postgres...:5432`；本机脚本走 ClusterIP `10.100.200.12` / `10.96.75.0`，见第 9 节）。
+* 写进 k8s Secret 的 `PG_DSN` 用专属角色 `ci_triage_app`，`AMQP_*` 用 `ci_orch` / `ci_agent_<stage>`；
+  运行时不依赖任何共享超户。
 * 探针：readiness `/readyz`、liveness `/healthz`；`orchestrator` 用 `Recreate` 策略
   （避免两个编排层同时消费 `q.orch.results`）。
 * 调度：9 个 pod 都带 nodeAffinity 只允许 `dell-r7625`（原因见第 9 节）。
 
-### 7.1 全自包含演示镜像（`iqe-agent-orchestrator/ci-triage-allinone`）
+### 7.1 全自包含演示镜像（`iqe-agent-orchestrator/iqe-agent-orchestrator-allinone`）
 
 集群里这套是「无状态进程 + 外部 PG/MQ」；给评审/离线演示另有一个**单容器**口径：
 
@@ -270,7 +281,7 @@ bash deploy/deploy.sh            # selfcheck → 打镜像 → 推 Harbor → �
 PUSH=0 TAG=local-dev bash deploy/build_allinone.sh   # 只构建
 bash deploy/build_allinone.sh                        # 构建 + 推 Harbor（含 :latest）
 docker run -d --name ci-allinone -p 18080:8080 -p 15672:15672 \
-  172.31.0.3:7777/iqe-agent-orchestrator/ci-triage-allinone:latest
+  172.31.0.3:7777/iqe-agent-orchestrator/iqe-agent-orchestrator-allinone:latest
 ```
 
 * 容器内：Postgres 17 + RabbitMQ（vhost `/ci` + 9 个账号）+ 编排层 `:8080` + 8 Agent `:8101..8108`，
@@ -364,7 +375,7 @@ docker run -d --name ci-allinone -p 18080:8080 -p 15672:15672 \
 | 端到端 | 18 个 ci_feed 场景逐个 `POST /api/scan`，Case 全部按 §6 的期望收敛 |
 | 集成测试 | `pytest -m integration` **43 passed**（19 场景参数化 + 分支形态 + 三闸门 + 计划层 + 幂等/DLQ/重放 + API/UI） |
 | 12 阶段 demo | `python demos/harness.py --all` 两条分支 12 个阶段全绿；`pytest tests/unit/test_demos_*.py` 2 passed |
-| 全自包含镜像 | `ci-triage-allinone` 单容器 9 进程就绪（PG 17 / RabbitMQ 4.0.5）；`new_failure` 走完 triage→gate1→fix→verify→gate2→evidence→check→bisect→create→gate3→reporting |
+| 全自包含镜像 | `iqe-agent-orchestrator-allinone` 单容器 9 进程就绪（PG 17 / RabbitMQ 4.0.5）；`new_failure` 走完 triage→gate1→fix→verify→gate2→evidence→check→bisect→create→gate3→reporting |
 
 扫 18 个场景（另含 1 次调度器自动扫描，共 19 次 `scan`）后直接查 Postgres：
 
@@ -408,7 +419,7 @@ tickets 39 · dlq 1 · msg_dedup 351 · daily_reports 1 · workflows 4 · checkp
 ### 10.3 当前线上镜像与回滚
 
 ```
-tag     172.31.0.3:7777/library/ci-triage:20261126-0215-d1c0e0cf8854
+tag     172.31.0.3:7777/iqe-agent-orchestrator/iqe-agent-orchestrator:20261126-0215-d1c0e0cf8854
 digest  sha256:fc1c684caff48f47f4d85e516058135803bd2fd33adeebb672c02839acefdcc4   # 回滚锚点
 上一版  sha256:5d26664a0b7cafac70b9ef3f7c088d1a6c956ea64414bc63567f196b4e20c2d8
 ```
@@ -417,7 +428,7 @@ digest  sha256:fc1c684caff48f47f4d85e516058135803bd2fd33adeebb672c02839acefdcc4 
 > 否则旧 Agent 会把新 payload 全部 nack 进 DLQ。回滚一个单元的写法：
 
 ```bash
-kubectl -n ci-triage set image deployment/orchestrator app=172.31.0.3:7777/library/ci-triage@sha256:<旧 digest>
+kubectl -n ci-triage set image deployment/orchestrator app=172.31.0.3:7777/iqe-agent-orchestrator/iqe-agent-orchestrator@sha256:<旧 digest>
 kubectl -n ci-triage rollout status deployment/orchestrator
 ```
 
@@ -428,3 +439,72 @@ $VENV -m iqe_agents.tools.selfcheck                  # deploy.sh 的第一步，
 $VENV -m iqe_orchestrator.tools.ui_render_check      # UI 页面渲染（空库 + 真实数据）
 $VENV -m iqe_orchestrator.tools.graph_smoke          # 状态机与计划层
 ```
+---
+
+## 11. 凭据与账号
+
+### 11.1 原则：业务只用专属账号
+
+| 资源 | 运行时账号 | 谁拥有 | 共享超户是否参与运行 |
+|---|---|---|---|
+| Postgres `ci_triage` | `ci_triage_app`（该库 19 表 + 5 序列的 owner） | 本系统 | 否（`postgres` 仅建库时用） |
+| RabbitMQ vhost `/ci` | `ci_orch` + `ci_agent_<stage>` × 8（口令同源 `CI_APP_PASS`） | 本系统 | 否（`admin` 仅建账号时用） |
+| Harbor 镜像 | `robot$iqe-agent-orchestrator+deploy`（仅本项目 push/pull） | 本系统 | 否（`admin` 仅建 robot 时用） |
+
+好处是双向隔离：共享实例轮换超户口令不影响本系统；本系统轮换自己的口令也不影响
+`deb-ci` / `ai-test-fw` / `hf_tracker` 等同集群服务。
+
+### 11.2 一次性初始化（新环境照抄）
+
+```bash
+# Postgres：专属角色 + 该库所有权（库需已存在，或先用 PG_ADMIN 跑 ensure_database）
+create role ci_triage_app login password <PG_APP_PASS>;   -- 值取自 deploy/secrets.env
+grant connect, temporary on database ci_triage to ci_triage_app;
+\c ci_triage
+grant usage, create on schema public to ci_triage_app;
+alter table public."<t>" owner to ci_triage_app;      -- 对每张表
+alter sequence public."<s>" owner to ci_triage_app;   -- 对每个序列
+alter default privileges in schema public grant all on tables to ci_triage_app;
+alter default privileges in schema public grant all on sequences to ci_triage_app;
+# 之后 $VENV -m iqe_orchestrator.migrate 用该角色即可自建缺失表
+
+# RabbitMQ：幂等，直接跑（口令取 CI_APP_PASS，不回显）
+$VENV -m iqe_orchestrator.tools.setup_broker --mgmt http://127.0.0.1:15672
+
+# Harbor：私有项目 + 项目级 robot（注意本实例 ProjectReq 字段是 project_name）
+curl -X POST -u admin:<admin> -H 'Content-Type: application/json' \
+  -d '{"project_name":"iqe-agent-orchestrator","storage_limit":-1,"public":false}' \
+  http://172.31.0.3:7777/api/v2.0/projects
+curl -X POST -u admin:<admin> -H 'Content-Type: application/json' -d '{
+  "name":"deploy","duration":-1,"level":"project",
+  "permissions":[{"access":[{"resource":"repository","action":"push"},
+                            {"resource":"repository","action":"pull"}],
+                  "kind":"project","namespace":"iqe-agent-orchestrator"}]
+}' http://172.31.0.3:7777/api/v2.0/robots     # secret 只在创建响应里出现一次
+```
+
+### 11.3 轮换步骤（改了口令只动这两个文件）
+
+1. RabbitMQ：管理台 `PUT /api/users/<name>` 逐个改（9 个账号同一个口令），改完**必须**重启 9 个进程 /
+   `kubectl -n ci-triage rollout restart deployment`，否则旧连接还能活、新连接全 403。
+2. Postgres：`alter role ci_triage_app password '<new>'`，然后滚动重启。
+3. Harbor：`POST /robots` 新建 robot → 改 `HARBOR_USER/HARBOR_PASS` → `deploy.sh` 会重建
+   `harbor-pull` secret → 删掉旧 robot（别留闲置凭证）。
+4. 更新 `deploy/secrets.env`（唯一明文处，600 权限、已 gitignore），并把它的新旧值都追加进
+   `deploy/secret_denylist.txt`，让 `scripts/check_secrets.sh` 挡住再次写进仓库。
+
+### 11.4 2026-11-27 轮换记录（遗留风险交底）
+
+早期版本的 `scripts/check_secrets.sh` 把 4 个真实口令写进了脚本自身，随 `develop`/`main`/`feature/jsd_init`
+推到 GitHub（历史提交 `e07a1e5` 及更早可见）。经确认**不改写历史**，改为轮换失效：
+
+| 已泄露口令 | 处置 |
+|---|---|
+| 旧 MQ 应用口令（写在该脚本里的示例值） | 已轮换（9 个账号），旧口令实测 `ACCESS_REFUSED` |
+| Harbor `admin` 默认口令 | 本系统改用项目级 robot，不再使用该账号；**admin 本身仍是默认口令，建议基础设施负责人尽快改** |
+| Postgres `postgres` 超户 | 本系统改用 `ci_triage_app`；**超户口令未改**（实测 `deb-ci-leader`、`deb-ci-orchestrator`、`ai-test-fw`、`hf_tracker` 均在用它，直接改会连带打挂） |
+| RabbitMQ `admin` | 同上，broker 被 `/`、`deb-ci` 等 vhost 共用，未改 |
+
+> 交给基础设施负责人的动作：在维护窗口内轮换 `postgres` 超户、RabbitMQ `admin`、Harbor `admin`
+> 三个共享口令，并同步各服务的连接配置；本系统无需改动（运行时不引用它们）。
+> 另：GitHub 上该仓库若仍为私有，请确认访问面；历史里的口令虽已失效，仓库可见性仍建议复核。

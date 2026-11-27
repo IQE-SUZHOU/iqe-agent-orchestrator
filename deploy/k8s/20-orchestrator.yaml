@@ -37,7 +37,7 @@ spec:
                       - dell-r7625   # 实测：Harbor 可拉 + 无 DiskPressure（jsd 有磁盘压力会被驱逐）
       containers:
         - name: orchestrator
-          image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
+          image: 172.31.0.3:7777/iqe-agent-orchestrator/iqe-agent-orchestrator:IMAGE_TAG
           command: ["ci-orchestrator"]
           envFrom:
             - configMapRef:

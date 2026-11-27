@@ -17,7 +17,7 @@ if [ -f "$SECRETS_ENV" ]; then
 fi
 REGISTRY="${HARBOR_REGISTRY:-172.31.0.3:7777}"
 REGISTRY="${REGISTRY#http://}"; REGISTRY="${REGISTRY#https://}"
-REPO="${REPO:-$REGISTRY/iqe-agent-orchestrator/ci-triage-allinone}"
+REPO="${REPO:-$REGISTRY/iqe-agent-orchestrator/iqe-agent-orchestrator-allinone}"
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo nogit)$(git diff --quiet 2>/dev/null || echo -dirty)"
 TAG="${TAG:-$(date +%Y%m%d-%H%M)-${GIT_SHA}}"
 PUSH="${PUSH:-1}"
