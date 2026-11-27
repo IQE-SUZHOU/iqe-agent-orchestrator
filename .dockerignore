@@ -23,3 +23,9 @@ deploy/secrets.env
 .env
 .pre-commit-config.yaml
 Makefile
+# 前端构建在容器内完成（npm ci → npm run build），宿主的 node_modules 必须排除。
+# 注意 Docker 不做 basename 匹配：上面的 dist/ 只挡顶层，web-ui/dist 要单独列。
+# 否则 COPY web-ui/ ./ 会把宿主（glibc）的 esbuild/rollup 原生二进制覆盖进
+# alpine（musl）容器，构建随机失败在 vite 阶段。
+**/node_modules/
+web-ui/dist/
