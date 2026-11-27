@@ -25,8 +25,14 @@ fi
 : "${HARBOR_USER:?缺少 HARBOR_USER}"
 : "${HARBOR_PASS:?缺少 HARBOR_PASS}"
 REGISTRY="${HARBOR_REGISTRY:-172.31.0.3:7777}"
-# 镜像放在独立项目 ci-triage 下（不用 library：那是共享项目，且推送凭证会波及别人的镜像）
-REPO="${REPO:-$REGISTRY/iqe-agent-orchestrator/iqe-agent-orchestrator}"
+# 生产主镜像仓库（变量名与 all-in-one 的 ALLINONE_REPO 严格分开，见 secrets.env.example）
+REPO="${IMAGE_REPO:-$REGISTRY/iqe-agent-orchestrator/iqe-agent-orchestrator}"
+# 防呆：这个脚本构建的是无状态生产镜像，推错仓库会把演示镜像盖到生产 latest 上。
+case "$REPO" in
+  *-allinone)
+    echo "✗ IMAGE_REPO 指向 all-in-one 仓库（$REPO），deploy.sh 只应推生产主镜像"
+    exit 1 ;;
+esac
 PG_CLUSTER_HOST="${PG_CLUSTER_HOST:-postgres.infra-database.svc.cluster.local}"
 PG_PORT="${PG_PORT:-5432}"
 AMQP_HOST="${AMQP_HOST:-rabbitmq.infra-database.svc.cluster.local}"

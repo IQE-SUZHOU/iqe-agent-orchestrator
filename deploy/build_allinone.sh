@@ -17,7 +17,15 @@ if [ -f "$SECRETS_ENV" ]; then
 fi
 REGISTRY="${HARBOR_REGISTRY:-172.31.0.3:7777}"
 REGISTRY="${REGISTRY#http://}"; REGISTRY="${REGISTRY#https://}"
-REPO="${REPO:-$REGISTRY/iqe-agent-orchestrator/iqe-agent-orchestrator-allinone}"
+REPO="${ALLINONE_REPO:-$REGISTRY/iqe-agent-orchestrator/iqe-agent-orchestrator-allinone}"
+# 防呆：本脚本产出的 all-in-one 镜像（内含 Postgres + RabbitMQ，约 1GB）绝不能进生产主镜像仓库。
+# 曾经 secrets.env 里一个共用的 REPO 变量让下面的默认值失效，把演示镜像推成了生产 latest。
+case "$REPO" in
+  *-allinone) ;;
+  *)
+    echo "✗ ALLINONE_REPO 指向 $REPO，不是 *-allinone 仓库 → 拒绝推送（会覆盖生产主镜像）"
+    exit 1 ;;
+esac
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo nogit)$(git diff --quiet 2>/dev/null || echo -dirty)"
 TAG="${TAG:-$(date +%Y%m%d-%H%M)-${GIT_SHA}}"
 PUSH="${PUSH:-1}"
