@@ -1,4 +1,4 @@
-# 一份镜像装两个子项目：orchestrator + agents，靠不同 console script 起 7 个进程。
+# 一份镜像装两个子项目：orchestrator + agents，靠不同 console script 起 9 个进程（1 编排 + 8 Agent）。
 # 需要真正隔离时，可分别用 orchestrator/ 或 agents/ 单独构建（各自都带一份 common 层）。
 FROM python:3.12-slim
 
@@ -24,5 +24,5 @@ RUN useradd -r -u 10001 appuser \
 USER 10001
 
 EXPOSE 8080
-# 默认是编排层；6 个 Agent 由 Deployment 覆盖 command（ci-agent-monitor / ci-agent-triage / …）
+# 默认是编排层；8 个 Agent 由 Deployment 覆盖 command（ci-agent-monitor / ci-agent-triage / …）
 CMD ["ci-orchestrator"]

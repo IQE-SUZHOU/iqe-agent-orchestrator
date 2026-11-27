@@ -1,0 +1,93 @@
+# 全自包含演示工作负载（参考清单，本轮未 apply）
+#
+# 与 20-orchestrator.yaml / 21-agents.yaml 的区别：那两份是「一个进程一个 Deployment +
+# 外部 PG/MQ」的生产口径；这里一份 Deployment 里跑全部 9 个进程 + PG + RabbitMQ。
+#
+# 应用前必须先把现有 Deployment 缩到 0，否则两套 broker 会让 q.agent.* 出现两个消费者：
+#   kubectl -n ci-triage scale deploy --all --replicas=0
+#   kubectl apply -f <(sed "s|IMAGE_TAG|$TAG|g" deploy/k8s/30-allinone.yaml)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: allinone
+  namespace: ci-triage
+  labels:
+    app.kubernetes.io/name: allinone
+    app.kubernetes.io/part-of: ci-triage-demo
+spec:
+  replicas: 1
+  # 内嵌状态库（PG/MQ）不能用滚动更新：两副本会各自起一套 broker
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: allinone
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: allinone
+    spec:
+      imagePullSecrets:
+        - name: harbor-pull
+      # entrypoint 需要 root 切换 postgres / rabbitmq 系统用户
+      securityContext:
+        runAsNonRoot: false
+        fsGroup: 999
+      containers:
+        - name: allinone
+          image: 172.31.0.3:7777/iqe-agent-orchestrator/ci-triage-allinone:IMAGE_TAG
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: amqp, containerPort: 5672 }
+            - { name: mgmt, containerPort: 15672 }
+          env:
+            - name: CI_DEMO_PASS
+              value: ci-demo-pass
+            - name: SCHEDULER_ENABLED
+              value: "true"
+            - name: MONITOR_SCAN_INTERVAL_S
+              value: "3600"
+            - name: SCAN_STARTUP_DELAY_S
+              value: "3600"
+            - name: LOG_JSON
+              value: "true"
+            - name: MOCK_SCENARIO
+              value: default
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 12
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 300m, memory: 1Gi }
+            limits: { cpu: "2", memory: 3Gi }
+          volumeMounts:
+            - { name: pgdata, mountPath: /var/lib/postgresql }
+            - { name: mqdata, mountPath: /var/lib/rabbitmq }
+            - { name: plans, mountPath: /var/lib/ci-triage }
+      volumes:
+        - name: pgdata
+          emptyDir: {}
+        - name: mqdata
+          emptyDir: {}
+        - name: plans
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: allinone
+  namespace: ci-triage
+spec:
+  selector:
+    app.kubernetes.io/name: allinone
+  ports:
+    - { name: http, port: 8080, targetPort: http }
+    - { name: amqp, port: 5672, targetPort: amqp }
+    - { name: mgmt, port: 15672, targetPort: mgmt }

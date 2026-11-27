@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 本机全链路起进程：1 个编排层 + 6 个 Agent，连集群里现有的 RabbitMQ / Postgres。
+# 本机全链路起进程：1 个编排层 + 8 个 Agent，连集群里现有的 RabbitMQ / Postgres。
 # 用途：在打镜像上 k8s 之前，先在本机跑通端到端（测试直接打 http://127.0.0.1:8080）。
 set -euo pipefail
 
@@ -49,7 +49,8 @@ for i in $(seq 1 60); do
   sleep 1
 done
 
-ports=(monitor:8101 triage:8102 reproduction:8103 ticket:8104 review:8105 reporting:8106)
+ports=(monitor:8101 triage:8102 reviewer:8103 remediation:8104 reproduction:8105
+       regression:8106 ticketing:8107 reporting:8108)
 for entry in "${ports[@]}"; do
   stage="${entry%%:*}"; port="${entry##*:}"
   echo "[run_local] 2) agent $stage :$port"
@@ -64,7 +65,7 @@ echo "[run_local] UI: http://127.0.0.1:$ORCH_PORT/   API base: http://127.0.0.1:
 echo "[run_local] 跑测试：ORCH_BASE_URL=http://127.0.0.1:$ORCH_PORT PG_DSN=$PG_DSN $VENV -m pytest tests -q"
 
 while true; do
-  for entry in orchestrator monitor triage reproduction ticket review reporting; do
+  for entry in orchestrator monitor triage reviewer remediation reproduction regression ticketing reporting; do
     pid_file="$LOG_DIR/$entry.pid"
     [ -e "$pid_file" ] || continue
     if ! kill -0 "$(cat "$pid_file")" 2>/dev/null; then

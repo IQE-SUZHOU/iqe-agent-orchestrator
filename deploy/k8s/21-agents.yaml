@@ -1,6 +1,8 @@
-# 6 个 Agent：各自独立 Deployment / 独立账号 / 独立队列，互不直连（星型拓扑，只经编排层）
-# 同一个镜像不同 command —— 已在 docs/architecture/05 记录为可接受的演示偏离
-
+# 8 个 Agent（monitor / triage / reviewer / remediation / reproduction / regression /
+# ticketing / reporting）：各自独立 Deployment / 独立账号 / 独立队列，互不直连（星型拓扑，只经编排层）。
+# 一个 Agent 承载多个 mode（reviewer 三闸门、reproduction evidence|verify、regression check|bisect、
+# reporting case|daily），mode 由命令载荷里的 payload.mode 决定，队列与账号按 Agent 划分。
+# 同一个镜像不同 command —— 已在 docs/architecture/05 记录为可接受的演示偏离。
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -58,8 +60,6 @@ spec:
                 secretKeyRef:
                   name: ci-triage-credentials
                   key: AMQP_MONITOR
-            - name: NOISE_THRESHOLD
-              value: "0.85"
           ports:
             - name: http
               containerPort: 8080
@@ -91,7 +91,6 @@ spec:
       volumes:
         - name: work
           emptyDir: {}
-
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -180,7 +179,182 @@ spec:
       volumes:
         - name: work
           emptyDir: {}
-
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-reviewer
+  namespace: ci-triage
+  labels:
+    app: ci-triage-agent
+    stage: reviewer
+    app.kubernetes.io/part-of: ci-triage-demo
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ci-triage-agent
+      stage: reviewer
+  template:
+    metadata:
+      labels:
+        app: ci-triage-agent
+        stage: reviewer
+        app.kubernetes.io/part-of: ci-triage-demo
+    spec:
+      imagePullSecrets:
+        - name: harbor-pull
+      # 调度约束：只有 dell-r7625 与 jsd 配了 Harbor 的 insecure registry（HTTP:7777）；
+      # 新节点 d-001-g2-gfx1151 没配 → ErrImagePull("server gave HTTP response to HTTPS client")。
+      # jsd 当前 DiskPressure=True（新建 pod 立刻被 Evicted），所以只用 dell-r7625。
+      # 不改节点配置，用调度约束绕开——生产上应给节点补齐 certs.d 配置。
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - dell-r7625   # 实测：Harbor 可拉 + 无 DiskPressure（jsd 有磁盘压力会被驱逐）
+      containers:
+        - name: agent-reviewer
+          image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
+          command: ["ci-agent-reviewer"]
+          envFrom:
+            - configMapRef:
+                name: ci-triage-config
+            - secretRef:
+                name: ci-triage-credentials
+          env:
+            - name: SVC
+              value: agent-reviewer
+            - name: AMQP_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ci-triage-credentials
+                  key: AMQP_REVIEWER
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 320Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: work
+              mountPath: /var/lib/ci-triage
+      volumes:
+        - name: work
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-remediation
+  namespace: ci-triage
+  labels:
+    app: ci-triage-agent
+    stage: remediation
+    app.kubernetes.io/part-of: ci-triage-demo
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ci-triage-agent
+      stage: remediation
+  template:
+    metadata:
+      labels:
+        app: ci-triage-agent
+        stage: remediation
+        app.kubernetes.io/part-of: ci-triage-demo
+    spec:
+      imagePullSecrets:
+        - name: harbor-pull
+      # 调度约束：只有 dell-r7625 与 jsd 配了 Harbor 的 insecure registry（HTTP:7777）；
+      # 新节点 d-001-g2-gfx1151 没配 → ErrImagePull("server gave HTTP response to HTTPS client")。
+      # jsd 当前 DiskPressure=True（新建 pod 立刻被 Evicted），所以只用 dell-r7625。
+      # 不改节点配置，用调度约束绕开——生产上应给节点补齐 certs.d 配置。
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - dell-r7625   # 实测：Harbor 可拉 + 无 DiskPressure（jsd 有磁盘压力会被驱逐）
+      containers:
+        - name: agent-remediation
+          image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
+          command: ["ci-agent-remediation"]
+          envFrom:
+            - configMapRef:
+                name: ci-triage-config
+            - secretRef:
+                name: ci-triage-credentials
+          env:
+            - name: SVC
+              value: agent-remediation
+            - name: AMQP_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ci-triage-credentials
+                  key: AMQP_REMEDIATION
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 320Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: work
+              mountPath: /var/lib/ci-triage
+      volumes:
+        - name: work
+          emptyDir: {}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -271,16 +445,15 @@ spec:
       volumes:
         - name: work
           emptyDir: {}
-
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: agent-ticket
+  name: agent-regression
   namespace: ci-triage
   labels:
     app: ci-triage-agent
-    stage: ticket
+    stage: regression
     app.kubernetes.io/part-of: ci-triage-demo
 spec:
   replicas: 1
@@ -289,12 +462,12 @@ spec:
   selector:
     matchLabels:
       app: ci-triage-agent
-      stage: ticket
+      stage: regression
   template:
     metadata:
       labels:
         app: ci-triage-agent
-        stage: ticket
+        stage: regression
         app.kubernetes.io/part-of: ci-triage-demo
     spec:
       imagePullSecrets:
@@ -313,9 +486,9 @@ spec:
                     values:
                       - dell-r7625   # 实测：Harbor 可拉 + 无 DiskPressure（jsd 有磁盘压力会被驱逐）
       containers:
-        - name: agent-ticket
+        - name: agent-regression
           image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
-          command: ["ci-agent-ticket"]
+          command: ["ci-agent-regression"]
           envFrom:
             - configMapRef:
                 name: ci-triage-config
@@ -323,12 +496,12 @@ spec:
                 name: ci-triage-credentials
           env:
             - name: SVC
-              value: agent-ticket
+              value: agent-regression
             - name: AMQP_URL
               valueFrom:
                 secretKeyRef:
                   name: ci-triage-credentials
-                  key: AMQP_TICKET
+                  key: AMQP_REGRESSION
           ports:
             - name: http
               containerPort: 8080
@@ -360,16 +533,15 @@ spec:
       volumes:
         - name: work
           emptyDir: {}
-
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: agent-review
+  name: agent-ticketing
   namespace: ci-triage
   labels:
     app: ci-triage-agent
-    stage: review
+    stage: ticketing
     app.kubernetes.io/part-of: ci-triage-demo
 spec:
   replicas: 1
@@ -378,12 +550,12 @@ spec:
   selector:
     matchLabels:
       app: ci-triage-agent
-      stage: review
+      stage: ticketing
   template:
     metadata:
       labels:
         app: ci-triage-agent
-        stage: review
+        stage: ticketing
         app.kubernetes.io/part-of: ci-triage-demo
     spec:
       imagePullSecrets:
@@ -402,9 +574,9 @@ spec:
                     values:
                       - dell-r7625   # 实测：Harbor 可拉 + 无 DiskPressure（jsd 有磁盘压力会被驱逐）
       containers:
-        - name: agent-review
+        - name: agent-ticketing
           image: 172.31.0.3:7777/library/ci-triage:IMAGE_TAG
-          command: ["ci-agent-review"]
+          command: ["ci-agent-ticketing"]
           envFrom:
             - configMapRef:
                 name: ci-triage-config
@@ -412,12 +584,14 @@ spec:
                 name: ci-triage-credentials
           env:
             - name: SVC
-              value: agent-review
+              value: agent-ticketing
             - name: AMQP_URL
               valueFrom:
                 secretKeyRef:
                   name: ci-triage-credentials
-                  key: AMQP_REVIEW
+                  key: AMQP_TICKETING
+            - name: TICKET_BACKEND
+              value: "jira-mock"
           ports:
             - name: http
               containerPort: 8080
@@ -449,7 +623,6 @@ spec:
       volumes:
         - name: work
           emptyDir: {}
-
 ---
 apiVersion: apps/v1
 kind: Deployment

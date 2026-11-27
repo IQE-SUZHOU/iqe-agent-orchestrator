@@ -7,7 +7,7 @@ metadata:
 ---
 # 凭证不进仓库：下面两个 Secret 由 deploy/deploy.sh 从 deploy/secrets.env 生成，
 # Deployment 只引用名字（envFrom.secretRef）。
-#   ci-triage-credentials : PG_DSN + AMQP_ORCH + AMQP_{MONITOR,TRIAGE,REPRODUCTION,TICKET,REVIEW,REPORTING}
+#   ci-triage-credentials : PG_DSN + AMQP_ORCH + AMQP_{MONITOR,TRIAGE,REVIEWER,REMEDIATION,REPRODUCTION,REGRESSION,TICKETING,REPORTING}
 #   harbor-pull           : kubernetes.io/dockerconfigjson
 # 手工重建的等价命令见 deploy/README.md（Secrets 一节）。
 ---
