@@ -47,7 +47,19 @@ PG_APP_DSN_LOCAL="${PG_APP_DSN_LOCAL:-postgresql://${PG_APP_USER}:${PG_APP_PASS}
 # 镜像 tag = 时间 + git 短 sha + 构建内容哈希。
 # 内容哈希是必需的：同 tag 重推时节点上的旧镜像缓存不会失效（Harbor 同 tag 覆盖不通知 kubelet）。
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo nogit)$(git diff --quiet 2>/dev/null || echo -dirty)"
-CONTENT_HASH="${CONTENT_HASH:-$(git ls-files -z 2>/dev/null | sort -z | xargs -0 -r sha256sum 2>/dev/null | sha256sum | cut -c1-12)}"
+# 内容哈希只对工作区里真实存在的 tracked 文件计算。
+# 曾经踩过：有人删了文件还没提交（git status 里的 D），sha256sum 打不开 → xargs 退 123 →
+# pipefail 把发布打死在算 tag 这一步，报错还看不出跟镜像有什么关系。
+# 另外必须防"输入为空"：空集算出来的 sha256（e3b0c442…）是个看起来正常的哈希，
+# 会让不同构建拿到同一个 tag，那就彻底失去追溯意义了。
+HASH_INPUT=$(git ls-files -z 2>/dev/null | sort -z |
+  xargs -0 -r -I{} sh -c 'test -f "$1" && sha256sum "$1" || :' _ {} 2>/dev/null)
+HASH_COUNT=$(printf '%s' "$HASH_INPUT" | grep -c '' || true)
+[ "${HASH_COUNT:-0}" -ge 100 ] || {
+  echo "✗ 构建内容哈希输入异常（只数到 ${HASH_COUNT:-0} 个文件，仓库 tracked 文件应远超此数）"
+  exit 1
+}
+CONTENT_HASH="${CONTENT_HASH:-$(printf '%s\n' "$HASH_INPUT" | sha256sum | cut -c1-12)}"
 TAG="${TAG:-$(date +%Y%m%d-%H%M)-${GIT_SHA}-${CONTENT_HASH}}"
 
 echo "== 1) 离线自检（不需要 broker / DB）"
