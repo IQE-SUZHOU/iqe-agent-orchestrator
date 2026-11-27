@@ -31,7 +31,10 @@ data:
   STAGE_TIMEOUT_S: "30"
   STAGE_MAX_ATTEMPTS: "2"
   MAX_REVIEW_LOOPS: "2"
-  MAX_PLAN_STEPS: "8"
+  # 必须 ≥ 最长内置 workflow（s2_full 11 步 / s3_test_no_repro 10 步）。这里曾钉在 8
+  # （6-Agent 时代遗留）：线上每个 11 步计划都被校验器 V1 判非法、Case 直接 blocked，
+  # 而本机不吃 ConfigMap（代码默认 24）反而全绿。deploy.sh 第 1 步已加防漂移自检。
+  MAX_PLAN_STEPS: "24"
   MAX_INFLIGHT_CASES: "4"
   RECURSION_LIMIT: "40"
   MONITOR_SCAN_INTERVAL_S: "3600"

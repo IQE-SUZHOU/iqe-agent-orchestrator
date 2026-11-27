@@ -48,6 +48,18 @@ echo "== 1) 离线自检（不需要 broker / DB）"
 $PY -m iqe_agents.tools.selfcheck
 $PY -c "import iqe_orchestrator.app, iqe_orchestrator.graph, iqe_agents.runtime; print('import OK')"
 
+# 防漂移：ConfigMap 里的计划步数上限必须 ≥ 最长内置 workflow。
+# 曾经钉在 8 而 s2_full 有 11 步：线上每个长计划都被校验器 V1 判非法、Case 变 blocked，
+# 本机却不读 ConfigMap（代码默认 24）测试全绿——只有部署前自检能挡住这类"线上配置滞后代码"。
+WF_DIR="orchestrator/src/iqe_orchestrator/common/data/workflows"
+longest=$(grep -c '^  - id:' "$WF_DIR"/*.yaml 2>/dev/null | awk -F: '{if ($2 > m) m = $2} END {print m + 0}')
+cm_steps=$(sed -n 's/^[[:space:]]*MAX_PLAN_STEPS:[[:space:]]*"\([0-9]*\)".*/\1/p' deploy/k8s/00-infra.yaml)
+if [ -n "$cm_steps" ] && [ "$longest" -gt 0 ] && [ "$longest" -gt "$cm_steps" ]; then
+  echo "   ✗ ConfigMap MAX_PLAN_STEPS=$cm_steps < 最长内置 workflow $longest 步 → 长计划会被判非法，拒绝部署"
+  exit 1
+fi
+echo "   计划步数上限 ${cm_steps:-（未设，用代码默认）} ≥ 最长内置 workflow $longest 步"
+
 echo "== 2) 构建并推送镜像（$REPO，推送账号 $HARBOR_USER）"
 printf '%s' "$HARBOR_PASS" | docker login "$REGISTRY" -u "$HARBOR_USER" --password-stdin >/dev/null
 docker build -t "$REPO:$TAG" .
@@ -79,6 +91,8 @@ kubectl -n "$NS" create secret generic ci-triage-credentials --from-env-file="$C
 rm -f "$CREDS"
 
 echo "== 5) 应用清单（替换 IMAGE_TAG）"
+CMV=$(kubectl -n "$NS" get cm ci-triage-config -o jsonpath='{.metadata.resourceVersion}' 2>/dev/null || echo none)
+SECV=$(kubectl -n "$NS" get secret ci-triage-credentials -o jsonpath='{.metadata.resourceVersion}' 2>/dev/null || echo none)
 TMP=$(mktemp -d)
 for f in deploy/k8s/*.yaml; do sed "s|IMAGE_TAG|$TAG|g" "$f" > "$TMP/$(basename "$f")"; done
 kubectl apply -f "$TMP/00-infra.yaml"
@@ -93,6 +107,15 @@ for d in $(kubectl -n "$NS" get deploy -l app=ci-triage-agent -o jsonpath='{.ite
     *) echo "  删除遗留 Deployment $d"; kubectl -n "$NS" delete deploy "$d" --wait=false ;;
   esac
 done
+
+# ConfigMap / Secret 变了不会自动重启 Pod：改了 MAX_PLAN_STEPS 这类上限或轮换口令后，
+# 线上进程还带着旧环境变量继续跑。这里比对 apply 前后的 resourceVersion，变了就滚动一次。
+CMV2=$(kubectl -n "$NS" get cm ci-triage-config -o jsonpath='{.metadata.resourceVersion}' 2>/dev/null || echo none)
+SECV2=$(kubectl -n "$NS" get secret ci-triage-credentials -o jsonpath='{.metadata.resourceVersion}' 2>/dev/null || echo none)
+if [ "$CMV" != "$CMV2" ] || [ "$SECV" != "$SECV2" ]; then
+  echo "  ConfigMap/Secret 有变更（$CMV→$CMV2 / $SECV→$SECV2）→ 滚动重启，让新环境变量生效"
+  kubectl -n "$NS" rollout restart deployment
+fi
 
 kubectl -n "$NS" rollout status deployment/orchestrator --timeout=240s
 for s in $STAGES; do

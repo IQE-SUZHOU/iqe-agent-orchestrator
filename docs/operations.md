@@ -358,6 +358,14 @@ docker run -d --name ci-allinone -p 18080:8080 -p 15672:15672 \
 * **信封没有顶层 `mode` 字段**：`payload.mode` 才是分支。`publish_command_only` 曾用
   `env.get("mode")` 拼 routing key，恒定退化成 `ci.cmd.<stage>.run`，
   导致 DLQ 的 `original_routing_key` 丢失分支信息（现取 `payload.mode`）。
+* **ConfigMap 与代码默认值漂移会把长计划整个打死**：`deploy/k8s/00-infra.yaml` 的
+  `MAX_PLAN_STEPS` 曾钉在 8（6-Agent 时代），而新 `s2_full` 有 11 步 → 集群里每个 Case 报
+  `plan_validation_failed: V1 steps 数量 11 不在 [1,8]` 并直接 blocked，
+  本机却因为不吃 ConfigMap（代码默认 24）43 项集成测试全绿——**症状就是"本机全绿、线上全红"**。
+  现在 `deploy.sh` 第 1 步会比较「ConfigMap 上限 vs 最长内置 workflow 步数」，小了就拒绝部署；
+  同一段还比对 ConfigMap/Secret 的 resourceVersion，变了主动 `rollout restart`
+  （否则改了上限或轮换口令，线上进程仍带着旧环境变量跑）。
+
 * **`reviews` 表没有 `decision` 列**：`save_review` 只落 `verdict/reason_code/requested_info/checks/quality/loop_seq`。
   `decision=internal|external` 只在 `reviewer:gate1` 的 stage 输出（与 reporting 的入参）里，
   查库断言要从 `stage_runs.output` 取。
@@ -439,6 +447,19 @@ $VENV -m iqe_agents.tools.selfcheck                  # deploy.sh 的第一步，
 $VENV -m iqe_orchestrator.tools.ui_render_check      # UI 页面渲染（空库 + 真实数据）
 $VENV -m iqe_orchestrator.tools.graph_smoke          # 状态机与计划层
 ```
+### 10.4 本轮：口令轮换 + 专属账号 + 镜像迁项目（2026-11-27）
+
+| 项 | 结果 |
+|---|---|
+| 离线 | `pytest -m "unit or contract"` **62 passed**；`ci-selfcheck` 144 项；ruff / black / isort / `check_secrets.sh` 全绿 |
+| 本机 9 进程（新口令） | `pytest -m integration` **43 passed** |
+| 集群（镜像 `20261127-1141-5126ec0-1f0777a47a23`） | `pytest -m integration` **43 passed**（先红后绿：修掉 `MAX_PLAN_STEPS` 漂移，见第 9 节） |
+| 回滚锚点 digest | `sha256:604b6b0643449d6e953bdf421d35d07a4d42962c0db2ae6d49d592b0188afcc5` |
+| MQ 口令轮换 | 9 个账号已改；实测新口令可连、**旧口令 `ACCESS_REFUSED`**；删除旧阶段遗留的 `ci_agent_review` / `ci_agent_ticket` |
+| Postgres 专属角色 | `ci_triage_app` 拥有 `ci_triage` 库 19 表 + 5 序列，DDL 与读写实测通过；业务不再引用 `postgres` 超户 |
+| Harbor | 私有项目 `iqe-agent-orchestrator` + 项目级 robot 实测推送 / 节点拉取成功；闲置 robot 已删 |
+
+
 ---
 
 ## 11. 凭据与账号
