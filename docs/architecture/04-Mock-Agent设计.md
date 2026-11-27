@@ -1,350 +1,314 @@
-# 04 六个 Agent 设计（Mock 实现）
+# 04 Mock Agent 设计（8 个消费者 × 13 个 mode）
 
-## 0. 共同骨架
+图中的 12 个阶段由 **8 个部署单元 × 13 个执行单元（stage:mode）** 承载：
 
-每个 Agent 容器内部结构完全一致，只有「剧本」不同：
-
-```
-agent-<stage>/
- ├── main.py            # 启动：连 RabbitMQ → 声明/校验 queue+binding → consume → /healthz
- ├── contract.py        # 输入/输出校验（jsonschema，来自 schemas/）
- ├── mock_playbook.py   # 剧本：按 scenario 产出 Mock output
- ├── skills/            # SKILLs：*.md playbook（演示阶段只是被读取并回显 skill_id）
- └── tools/             # 工具适配层（演示阶段全部 mock：jenkins/jira/jarvis/logdistiller）
-```
-
-统一消费循环（示意）：
-
-```python
-async def handle(msg: aio_pika.IncomingMessage):
-    env = decode(msg.body)
-    if env["schema"] != "v1":             return await reject_to_dlq(msg, "schema_mismatch")  # nack(requeue=False)
-    if env["ttl_ms"] < age(env):          return await ack_result(msg, status="expired")
-    if await already_done(env):           return await msg.ack()          # 幂等层 2
-    if not claim(env["idempotency_key"]): return await msg.ack()          # 幂等层 1
-    await sleep(mock_delay(env))                                           # 模拟耗时
-    if mock_should_fail(env):             return await publish_result(msg, status="retryable",
-                                                  error={"code": "mock_fault"})
-    out = playbook.produce(env)                                            # Mock 结论
-    await save_evidence(env, out)                                          # 写 Postgres evidence
-    await publish_result(msg, status="ok", output=out)                     # publisher confirm 成功后
-    await msg.ack()                                                        # 才 ack，反之让其 redeliver
-```
-
-> 关键顺序：**先发布 result（等 confirm）再 ack 命令**。若 `publish_result` 抛错，不 ack，broker 会 redeliver，幂等层吸收重复。
-> 消费者启动时用 `channel.set_qos(prefetch_count=<见 02 §2.2>)`，并断言自己的 queue/binding 已存在（漏声明直接退出）。
-
-### 行为注入（演示控制面，全部 env 可配）
-
-| env | 含义 | 演示默认 |
-|---|---|---|
-| `MOCK_SCENARIO` | `normal` / `error` / `flaky` / `needs_info` / `reject` / `fault` | 由触发脚本指定（见 05 §4） |
-| `MOCK_DELAY_MS` | 模拟处理耗时（可 `min:max` 随机） | `200:900` |
-| `MOCK_FAILURE_RATE` | 注入 `retryable` 失败的概率 | `0.0`（故障演示时 `0.6`） |
-| `MOCK_LLM_ENABLED` | 是否真调模型（演示关闭，走剧本） | `false` |
-| `MOCK_FEED_SOURCE` | Monitor 读取的假 CI 数据文件路径 | `/fixtures/ci_feed.json` |
-| `MOCK_EVIDENCE_COUNT` | 每次产出的证据条数 | `2` |
-
-### SKILLs / Jarvis CLI / LogDistiller 在 Mock 阶段的形态
-
-| 组件 | Mock 形态 | 契约位置 |
-|---|---|---|
-| **SKILLs** | `skills/*.md` 诊断手册；Agent 按 `job→skill` 映射选中一个，output 里回显 `skills_used:[skill_id]` | Triage |
-| **Jarvis CLI** | `tools/jarvis.py` 只读白名单桩：`device_status` / `log_fetch`，返回固定 JSON，调用记录写 `evidence` | Triage |
-| **LogDistiller** | `tools/logdistiller.py`：把 Mock console 压成「错误簇 + 首尾上下文」，带硬预算（默认 6000 字符） | Triage / Reproduction / Reporting |
-| **LLM 判定** | 由剧本直接给 `rca`+`confidence`（`MOCK_LLM_ENABLED=true` 时才真调模型） | Triage / Reviewer |
-
----
-
-## 1. Monitor Agent（监控）
-
-| 项 | 内容 |
-|---|---|
-| 订阅 | queue `q.agent.monitor` ← rk `ci.cmd.monitor.scan` |
-| 发布 | exchange `ci.result` → rk `ci.result.monitor` |
-| 外部依赖（Mock） | `MOCK_FEED_SOURCE` 假构建列表（替换点：真实 Jenkins REST 轮询） |
-
-内部流程：
-1. 读 feed → 得到构建列表（job、build、result、console 摘要、changeSet）。
-2. **去噪**：`known_issue` 命中（本地缓存 signature，来自 `ci.event.case.*`）→ 标 `noise_score` 高；`result=SUCCESS` → `signal=none`；`ABORTED/UNSTABLE` → 按规则升为 `error`。
-3. **签名**：`sha1(job + 归一化错误簇 + stage)` → `signature`。
-4. **排优先级**：新增失败（历史无此 signature）= 高优先；历史复发 = 低优先；批量同 signature 合并为一条 observation。
-5. 输出 observation 列表（每条含 `signal`），**编排层据此分支**。
-
-Output（`ci.result.monitor`）：
-
-```json
-{
-  "scan_window": {"from": "2026-11-25T09:00:00Z", "to": "2026-11-25T09:05:00Z"},
-  "observations": [
-    {
-      "job": "staging-drv-gfx1151-smoke", "build": 128, "url": "http://jenkins/job/…/128",
-      "signal": "none", "result": "SUCCESS",
-      "signature": "sig-3f2a1c", "noise_score": 0.15, "priority": 3,
-      "summary": "构建成功，12 stages / 8m32s，无告警"
-    },
-    {
-      "job": "staging-drv-gfx1151-p1-regression", "build": 77, "url": "http://jenkins/job/…/77",
-      "signal": "error", "result": "FAILURE", "failed_stage": "test-kernel-mode",
-      "signature": "sig-9b71de", "first_seen": true, "noise_score": 0.05, "priority": 1,
-      "summary": "新增失败：test-kernel-mode 12/12 FAIL，console 含 PAGE_FAULT 错误簇 ×47"
-    }
-  ],
-  "counts": {"scanned": 10, "errors": 1, "suppressed": 2}
-}
-```
-
-失败与降级：feed 不可读 → `status=blocked, code=source_unavailable`；解析异常单条 → 跳过该条并在 `counts.skipped` 计数。
-
----
-
-## 2. Triage Agent（分类）
-
-| 项 | 内容 |
-|---|---|
-| 订阅 | queue `q.agent.triage` ← rk `ci.cmd.triage.run` |
-| 发布 | exchange `ci.result` → rk `ci.result.triage`（**不发布事件**：`ci.event.triage.classified` 在 V1 代码里没有任何发布点，已从事件登记移除，见 02 §3.1 / 06 §6） |
-| 工具（Mock） | LogDistiller、Jarvis CLI 桩、SKILL Playbook、历史查询（Postgres） |
-
-输入关键字段：`case`、`mode`（`full` / `classify_only`）、`outputs`（上游结论）、`extra_request`（Reviewer 回炉时要求补充的证据）。
-
-内部流程：
-1. **收集证据**：console（Mock）→ LogDistiller 蒸馏；job 配置摘要、changeSet、最近 N 次结果史、JUnit 摘要；按需 `jarvis device_status` / `jarvis log_fetch`。
-2. **选 SKILL**：`job 前缀/failed_stage → skill_id`（如 `driver-hang.md`、`env-lock.md`）。
-3. **分类根因**：`rca ∈ driver | test | environment | infrastructure | flaky | unknown` + `confidence`。
-4. **复现资格判定**：`repro_eligible` + `repro_plan`（`environment/infrastructure` 通常不给复现资格）。
-5. `classify_only` 模式：只做 1–3 步（蒸馏 + 分类 + 噪声标签），**不产出 repro_plan、不请求 Jarvis**，明确轻量。
-
-Output（`mode=full`）：
-
-```json
-{
-  "rca": "driver", "confidence": 0.78,
-  "category_detail": "GPU page fault in kernel mode after resume",
-  "skills_used": ["driver-hang.md"],
-  "evidence_refs": [{"kind": "distilled_log", "uri": "db://evidence/1042"},
-                    {"kind": "jarvis:device_status", "uri": "db://evidence/1043"}],
-  "distilled_chars": 5120, "raw_chars": 240000,
-  "history": {"same_signature_last_seen": "2026-11-21", "occurrences": 3},
-  "suspected_change": {"commit": "a1b2c3", "file": "amdgpu/resume.c"},
-  "repro_eligible": true,
-  "repro_plan": {"action": "jenkins_rebuild_same_params", "job": "staging-drv-gfx1151-p1-regression",
-                 "base_build": 77, "lock_resource": "sut-gfx1151-01", "max_runs": 2},
-  "summary": "驱动 resume 路径回归，疑似 a1b2c3 引入；测试与环境证据不足"
-}
-```
-
-Output（`mode=classify_only`，场景 S1）：
-
-```json
-{ "rca": "none", "confidence": 0.95, "noise_score": 0.12,
-  "skills_used": [], "evidence_refs": [{"kind": "distilled_log", "uri": "db://evidence/1050"}],
-  "repro_eligible": false, "summary": "构建成功，无需分诊；已计入观测台账" }
-```
-
-失败与降级：证据不足 → `rca=unknown, confidence≤0.4` 并照常返回（Reviewer 会驳回）；工具超时 → 丢弃该证据源并记 `evidence_gaps`。
-
----
-
-## 3. Reproduction Agent（复现）
-
-| 项 | 内容 |
-|---|---|
-| 订阅 | queue `q.agent.reproduction` ← rk `ci.cmd.reproduction.run` |
-| 发布 | exchange `ci.result` → rk `ci.result.reproduction`（段名用全称，不是 `ci.result.reproduce`） |
-| 工具（Mock） | Jenkins rebuild 桩、锁机桩、制品清单桩 |
-
-输入：`case` + `outputs.triage.output.repro_plan` + `extra_request`。
-
-内部流程：
-1. **资格闸门**：`repro_eligible=false` 或 `rca ∈ {infrastructure}` → 返回 `reproducible=blocked`（不重跑）。
-2. **受控重跑**：同参 rebuild ×`max_runs`（Mock：生成 `run_id` 列表 + 模拟结果），每次先取锁、跑完释放。
-3. **指纹比对**：重跑 console 蒸馏后与原 signature 比对 → `match_score`。
-4. **附加证据**：额外日志、JUnit、制品清单入 `evidence`。
-5. **可复现性判定**：`yes`（全部命中）/ `partial`（部分）/ `no`（全部不复现）/ `blocked`（无资格或资源不可用）；`flaky_score` = 不稳定度。
-
-Output：
-
-```json
-{
-  "reproducible": "partial", "match_score": 0.81, "flaky_score": 0.33,
-  "runs": [
-    {"seq": 1, "build": 78, "result": "FAILURE", "signature_match": true,  "duration_s": 412},
-    {"seq": 2, "build": 79, "result": "FAILURE", "signature_match": true,  "duration_s": 405},
-    {"seq": 3, "build": 80, "result": "SUCCESS", "signature_match": false, "duration_s": 398}
-  ],
-  "lock": {"resource": "sut-gfx1151-01", "held_s": 1230},
-  "artifacts_added": 3,
-  "summary": "3 次重跑 2 次复现原错误簇，存在环境相关抖动"
-}
-```
-
-护栏（Mock 也保留开关，便于后续接真实实现）：`REPRO_ENABLED=false` 时立即返回 `blocked(code=disabled)`；只允许 allowlist job 前缀 `staging-`；`max_runs ≤ 3`。
-
----
-
-## 4. Ticket Agent（工单）
-
-| 项 | 内容 |
-|---|---|
-| 订阅 | queue `q.agent.ticket` ← rk `ci.cmd.ticket.run` |
-| 发布 | exchange `ci.result` → rk `ci.result.ticket`（**不发布事件**：人工批准回路需要的 `ci.event.ticket.drafted` 在 V1 没有任何发布点，见 02 §3.1 / 06 §6） |
-| 工具（Mock） | Jira/Azure 桩（`JiraSearch` / `JiraCreate` / `AzureSearch`）返回假 key/URL |
-
-内部流程：
-1. **查重**：`signature` 精确匹配 → 工单台账；再按标题/错误簇关键词做关键词匹配（Mock：从 fixture 取一张已存在单）。命中 → `ticket_status=linked_duplicate`，不新建。
-2. **组装草稿**：标题（job + 现象 + signature 短码）、RCA 摘要、复现步骤（来自 repro）、证据链接、优先级、影响面、指派建议。
-3. **优先级与指派**：规则表 `(rca × reproducible × priority) → (ticket_priority, assignee_team)`。
-4. **创建**：`TICKET_AUTOCREATE=true`（演示默认）→ 直接返回 mock 单号；`false` → 只回 `ticket_status="drafted"`（`external_key="DRAFT-<case前6位>"`，`playbook.py:105`），**不发事件**（`ci.event.ticket.drafted` V1 未实现），人工批准入口因此只能靠 Case 详情里的工单状态，见 06。
-
-指派规则表（演示）：
-
-| rca | reproducible | → priority | → assignee |
+| 阶段 | 承载 | 阶段 | 承载 |
 |---|---|---|---|
-| driver | yes/partial | P1 | `DRV-CORE` |
-| driver | no | P2 | `DRV-CORE` |
-| test | any | P2 | `QA-IQE` |
-| environment | any | P3 | `LAB-OPS` |
-| infrastructure | any | P2 | `CI-INFRA` |
-| flaky | yes | P3 | `QA-IQE` |
-| unknown | any | P2 | `TRIAGE-LEAD` |
-
-Output：
-
-```json
-{
-  "ticket_status": "created", "backend": "jira", "external_key": "IQE-4821",
-  "url": "https://jira.local/browse/IQE-4821", "ticket_priority": "P1",
-  "assignee_team": "DRV-CORE", "duplicate_of": null,
-  "title": "[staging-drv-gfx1151-p1-regression#77] kernel-mode page fault on resume (9b71de)",
-  "sections": {"rca": true, "repro_steps": true, "evidence": 5, "history": true},
-  "summary": "已建单 IQE-4821，附 RCA/复现步骤/5 条证据，查重未命中"
-}
-```
-
-查重命中示例：
-
-```json
-{ "ticket_status": "linked_duplicate", "backend": "jira", "external_key": "IQE-4610",
-  "url": "https://jira.local/browse/IQE-4610", "duplicate_of": "IQE-4610",
-  "assignee_team": "DRV-CORE", "ticket_priority": "P1",
-  "summary": "signature 命中已有单 IQE-4610，已关联并追加本次 occurrence" }
-```
+| 1 失败发现 | `monitor:scan` | 6a 修复复核 | `reviewer:gate2` |
+| 2 分诊 | `triage:classify` | 6c 补丁定位 | `regression:bisect` |
+| 3 分流闸门 | `reviewer:gate1` | 7b 建单 | `ticketing:create` |
+| 4a 自动修复 | `remediation:fix` | 8b 工单闸门 | `reviewer:gate3` |
+| 4b 受控复现 | `reproduction:evidence` | 9 报告 | `reporting:case` |
+| 5a 修复验证 | `reproduction:verify` | 9 日报 | `reporting:daily` |
+| 5b 回归判定 | `regression:check` | | |
 
 ---
 
-## 5. Reviewer Agent（审核）
+## 1. 设计原则
+
+1. **一个 Agent 只做一件事**：订阅自己的命令队列 → 按 `payload.mode` 跑对应剧本 → 把 result 发回总线。
+   它不决定下游是谁（星型拓扑，编排层决定），也不暴露业务 HTTP，只有 `/healthz`。
+2. **剧本是纯函数**：`async def handler(ctx: Ctx) -> dict`，全部输入来自 `ctx.env`、`ctx.db`、`ctx.fixtures`、
+   `ctx.kb`，不直接碰总线；因此可以脱离 MQ/DB 单测（`ci-selfcheck` 就是这么跑的）。
+3. **业务是 Mock，骨架是真的**：消息拓扑、契约校验、四层幂等、超时重试、回炉、DLQ、证据落库都是真实代码；
+   只有"结论从哪来"换成了确定性夹具。
+4. **写权最小化**：Agent 只写 `evidence` 与 `msg_dedup`；业务表（cases / reviews / tickets / kb_entries …）
+   由编排层收到 result 后写。Reporting 想把经验写进知识库，只能放进输出的 `kb_writes`。
+5. **结论词优先于夹具**：闸门的机械预检不过时恒为 `needs_info` / `rework`；夹具只能在"机械结论为 approve"时
+   把结论改严（或 `force=true` 强制覆盖），**不能把该拒绝的改成通过**。
+
+---
+
+## 2. 一个 Agent 的运行骨架
+
+```
+consume(q.agent.<stage>, prefetch=N)
+  ├─ schema 不合法 / mode 不属于本 stage / TTL 过期 ──→ nack(requeue=False) → ci.dlx → q.dlq
+  ├─ msg_dedup claim(idempotency_key) 已存在 ────────→ ack（重复投递，不重跑）
+  ├─ stage_runs 判 already_done（同 key 已有结果）──→ 复用结果直接发布
+  ├─ ctx = Ctx(env, db, fixtures, kb, sleep, evidence)
+  ├─ output = await playbook.handler(ctx)           # 剧本内按 payload.mode 分派
+  │    ├─ raise Blocked(code, detail) → status=blocked + evidence("blocked", …)
+  │    └─ 正常返回 → validate_stage_contract(stage, "output") 校验形状
+  ├─ publish(ci.result.<stage>, status=ok, output, idempotency_key 原样带回)
+  │    └─ 等 publisher confirm；失败则不 ack，让 broker 重投
+  └─ ack
+```
+
+`ctx.sleep()` 会先 `sleep(min(MOCK_DELAY_MS 区间随机值, …))`，用来制造"真实耗时"；
+剧本里显式写的 `sleep_s` 用于演示"编排层超时 → retryable → 重试耗尽 → blocked/DLQ"。
+
+---
+
+## 3. 8 个 Agent
+
+### 3.1 monitor（阶段 1）
 
 | 项 | 内容 |
 |---|---|
-| 订阅 | queue `q.agent.review` ← rk `ci.cmd.review.run` |
-| 发布 | exchange `ci.result` → rk `ci.result.review` |
-| 独立性 | **不读** Triage 的推理文本，只读 `evidence_refs` + 各阶段结构化 output；独立 prompt / 可配独立模型 `REVIEW_MODEL` |
+| 命令 / 结果 | `ci.cmd.monitor.scan` / `ci.result.monitor` |
+| 输入 | `scan_id` `lookback` `jobs_filter[]`（可选 `source`） |
+| 输出 | `scan_id` `observations[]` `counts` `scan_window` `source_status` |
+| 剧本 | 读 Mock CI 流水 → 逐 build 算签名与签名族 → 去噪/合并 → 产出观测 |
+| 结论 | 每 build：`signal=none|error`；error 再判 `suppressed` + `promoted_reason` |
+| 证据 | `scan`（每条观测一条，含日志摘要；全文进 evidence 表） |
+| 夹具 | `fixtures/ci_feed/*.json`（19 份） |
 
-机械预检（实现对照 `agents/review/playbook.py`；**顺序与 `id` 即契约编号**，编排层与自测都按 `checks[i].id` 取值）：
+确定性规则：
 
-| # | `checks[].id` | 检查内容 | 失败 `reason_code` | 失败动作 |
-|---|---|---|---|---|
-| 1 | `evidence_present` | Case 已有证据引用 | `insufficient_evidence` | `needs_info` |
-| 2 | `evidence_count_ok` | 证据条数 ≥ `MIN_EVIDENCE`=2 | `insufficient_evidence` | `needs_info` |
-| 3 | `triage_confidence_ok` | `rca ≠ unknown` 且 `confidence ≥ CONFIDENCE_MIN`=0.70 | `missing_triage` | `needs_info` |
-| 4 | `repro_conclusion` | 复现段已给出 `reproducible` 结论（判据见下） | `missing_repro` | `needs_info` |
-| 5 | `ticket_sections_nonempty` | 工单关键段落（`rca` / `repro` / `evidence`）齐且非空 | `missing_ticket_sections` | `needs_info` |
-| 6 | `no_duplicate_ticket` | 不得既有重复工单又继续开单 | `duplicate_ticket` | 首轮 `needs_info`；**第 2 轮仍未澄清 → `reject`** |
-| 7 | `signal_repro_consistent` | `signal` 与复现结论自洽（`none` 不得 `yes/flaky`；`error` 不得 `blocked`） | `inconsistent_evidence` | `needs_info` |
-| 8 | `loop_not_exhausted` | 回炉轮次 ≤ `loop_max`（= `MAX_REVIEW_LOOPS`，默认 2） | `loop_exhausted` | `needs_info`（编排层据此把 Case 收尾为 `blocked`） |
-
-**第 4 / 5 条的「跳过」语义（实现期定稿）**：
-
-- 「不适用」**不是新字段、也不是新的 status**：该项照样写进 `checks[]`，`pass = true`，`detail` 里写明跳过原因，`reason_code = null`（`_check()` 在 `pass=true` 时把 `reason_code` 强制置 null，见 `playbook.py:63-65`）。
-- **#4 跳过条件**：本 Case 的计划里没有 reproduction 段。判据是编排层注入的输入 `repro_attempted = ("reproduction" in outputs)`（`orchestrator/src/iqe_orchestrator/graph.py:455`）。跳过时 `detail = "计划未包含复现段，跳过"`。只有 `signal=error` 且 `repro_attempted=true` 而 `reproducible` 为空时才算真失败（`missing_repro`）。
-- **#5 跳过条件**：没有工单段，判据是输入 `ticket_status is None`（取自库里 `tickets` 行，`graph.py:449-451`）。跳过时 `detail = "计划无 ticket，跳过"`。
-- 所以 `checks[]` **恒定 8 项**（契约上限 20），`checks_passed + checks_failed = 8` 恒成立。要看"有没有做复现/开单"，请看 `detail` 里的「跳过」或 `stage_runs` 里有没有该 stage，**不要**用"检查条数"推断。
-
-`checks[]` 元素的字段（权威形状 `playbook.py:63-65`）：
-
-```json
-{ "id": "evidence_count_ok",              // 稳定 id，编排层/自测/日报按它取值
-  "name": "证据条数 >= 2",                 // 人读名称
-  "pass": false,                          // 「跳过」也是 true
-  "detail": "证据 1 条（要求 >= 2）",       // 截断 220 字；跳过时写「…，跳过」
-  "reason_code": "insufficient_evidence" // pass=true（含跳过）时恒为 null
-}
+```
+SUCCESS                     → signal=none，signature=null（不占下游）
+FAILURE/UNSTABLE/ABORTED    → signal=error，然后：
+  a) 签名族命中 known_issues.json 且 noise_score >= 0.85 → suppressed(known_issue_noise)
+  b) 同一次扫描内同签名族已有未抑制 error → 只保留 build 号最大者（duplicate_signature_merge）
+  c) 其余 promoted；UNSTABLE/ABORTED 的 promoted_reason=unstable_result
+场景文件缺失                → Blocked(source_unavailable)（只有 scenario=default 才允许回落 default.json）
 ```
 
-`verdict` 规则：全部 `pass` → `approve`（`reason_code="ok"`）；有失败 → `needs_info`，`reason_code` 取**第一个失败项**的 `reason_code`；#6 失败且 `loop_seq ≥ 2` → `reject`；#8 失败优先于夹具剧本，固定 `needs_info` + `loop_exhausted`。夹具 `fixtures/review/<scenario>.json` 的 `override` 可直接指定 `verdict / reason_code / requested_info`（演示 `reject`、永远 `needs_info`）。
+`counts` 里固定带 `total/success/error/suppressed/promoted`，编排层用它判断"这轮要不要建 Case"。
 
-Output（实现形状；`requested_info` 是**字符串数组**，最多 10 条，来自 `_REQUEST_INFO` 表）：
-
-```json
-{
-  "case_id": "01J8ZQ3C0AWF4H7S5G1JB9KTX2",
-  "verdict": "needs_info",
-  "reason_code": "missing_repro",
-  "requested_info": ["补充受控重跑记录与 reproducible 结论"],
-  "checks": [
-    {"id": "evidence_present", "name": "Case 已有证据引用", "pass": true,
-     "detail": "证据 3 条", "reason_code": null},
-    {"id": "repro_conclusion", "name": "复现段已给出 reproducible 结论", "pass": false,
-     "detail": "reproduction 已执行但输出里没有 reproducible 结论", "reason_code": "missing_repro"},
-    {"id": "ticket_sections_nonempty", "name": "工单关键段落非空", "pass": true,
-     "detail": "计划无 ticket，跳过", "reason_code": null}
-  ],
-  "quality_scores": {"evidence": 0.75, "repro": 0.5, "consistency": 0.75,
-                     "checks_passed": 6, "checks_total": 8, "overall": 0.68},
-  "notes": "Mock 复核说明\n第 1 轮机械预检 6/8 通过\n结论 needs_info（missing_repro）"
-}
-```
-
-`verdict` 只允许 `approve | needs_info | reject`；`approve` 必须全部机械检查通过。`reason_code` 的取值受 stage 契约枚举约束：`ok / insufficient_evidence / inconsistent_evidence / missing_repro / missing_ticket_sections / duplicate_ticket / missing_triage / mock_reject / loop_exhausted`（`orchestrator/src/iqe_orchestrator/common/data/schemas/stage-contracts.json` → `stages.review.output`）。
-
----
-
-## 6. Reporting Agent（报告）
+### 3.2 triage（阶段 2）
 
 | 项 | 内容 |
 |---|---|
-| 订阅 | queue `q.agent.reporting` ← rk `ci.cmd.reporting.#`（`case` / `daily` 同队列） |
-| 发布 | exchange `ci.result` → rk `ci.result.reporting`（段名用全称，不是 `ci.result.report`；**不发布事件**，`ci.event.report.published` 在 V1 没有发布点） |
-| 数据源 | Postgres（`cases` + `stage_runs` + `reviews` + `tickets` + `evidence` + `scans`） |
+| 命令 / 结果 | `ci.cmd.triage.classify` / `ci.result.triage` |
+| 输入 | `signal` `signature` `log_excerpt` `context` `evidence_refs[]`（回炉时带 `requested_focus`） |
+| 输出 | `rca` `path` `component` `os_stage` `signature` `duplicate_of` `confidence` `key_frames[]` `kb_refs[]` `evidence[]` |
+| 剧本 | LogDistiller 蒸馏 → 组件 → 根因/置信度（`rules.json`）→ internal/external 预判 → 知识库检索 |
+| 证据 | `triage`（关键帧与命中的知识条目） |
+| 技能 | `triage/skills/*.md`（按指纹族引用的分类知识，`skill_refs` 回填） |
 
-- `mode=case`：读该 Case 的全部结构化结论 + `stage_runs` 时间线，产出**单 Case 结案报告**（`report_md` + `metrics`）；编排层把它写进 `cases.case_report`（`graph.py:299-302`）。返回形状 `{case_id, day, report_md, metrics}`。
-- `mode=daily`：聚合当日 `cases` / `stage_runs` / `tickets` / `reviews`，生成 Markdown 日报正文，**直接写库** `daily_reports(day, report_md, metrics, cases)`（`reporting/playbook.py:214`），编排层再落一次索引。返回形状 `{case_id: null, day, report_md, metrics}`。
-- 两种 mode 都不再产生"素材区文件 + `report_ref`"：日报的真相是 `daily_reports` 表里那一行，读它用 `GET /api/daily-report?day=`（见 05 §4.1）。
+`path` 只是**预判**，最终由闸门 1 的 `decision` 覆盖。组件→路径的默认表：
 
-Output（`mode=daily` 的形状；`mode=case` 见上）：
-
-```json
-{
-  "case_id": null,
-  "day": "2026-11-25",
-  "report_md": "# Staging-CI 日报 2026-11-25\n\n## 概览\n…（≤20000 字）",
-  "metrics": {
-    "day": "2026-11-25", "cases_total": 9, "errors": 4, "observed_only": 5, "suppressed": 7,
-    "scans": 3, "tat_ms_avg": 61000, "open_cases": 1, "report_chars": 4120,
-    "status_distribution": {"closed": 5, "blocked": 1, "closed_rejected": 3},
-    "rca_distribution": {"driver": 2, "test": 1, "environment": 1},
-    "plan_source_distribution": {"workflow": 8, "llm": 1},
-    "top_signatures": [["sig-9b71de", 3]]
-  }
-}
-```
-
----
-
-## 7. Mock 剧本夹具（fixtures）
-
-| 文件 | 内容 | 消费方 |
+| component | rca | path |
 |---|---|---|
-| `fixtures/ci_feed.json` | 10 条假构建（含 1 条 error、2 条历史复发噪声） | monitor |
-| `fixtures/triage/<scenario>.json` | `error` / `normal` / `unknown` / `needs_info` 四种分类结论 | triage |
-| `fixtures/repro/<scenario>.json` | `yes` / `partial` / `no` / `blocked` | reproduction |
-| `fixtures/ticket/<scenario>.json` | `created` / `linked_duplicate` | ticket |
-| `fixtures/review/<scenario>.json` | `approve` / `needs_info` / `reject` | reviewer |
-| `fixtures/skills/*.md` | 2 个诊断 Playbook | triage |
-| `fixtures/known_issues.json` | 已知问题 signature → 已有工单号 | monitor（降噪）、ticket（查重） |
-| `fixtures/plans/<scenario>.yaml` | LLM 计划剧本：`warming_ok` / `skip_review`（V4 违规）/ `invalid_stage`（V2 违规） | orchestrator（`MOCK_LLM_ENABLED=true` 时整文件拷入 `PLANS_DIR`，走与人工 YAML 相同的校验路径） |
+| `ci-infra` / `apt-repo` / `install` / `test` / `toolchain` | 自动化侧 | `internal` |
+| `driver` / `image-build` / `network` / `timeout` / `unknown` | 产品/环境侧 | `external` |
 
-剧本选择优先级：`payload.scenario_hint`（编排层可透传 Reviewer 的 `requested_info`）→ env `MOCK_SCENARIO` → 默认。
+置信度低于阈值（`triage` 夹具或规则给出的 `unknown_low_confidence` 场景）时，`rca=unknown`，
+闸门 1 会判 `needs_info` 并回炉重分诊。
 
-> `fixtures/plans/*.yaml` 不参与上述优先级：它只模拟"LLM 写出来的文件"，整文件拷贝后**必须**再过 `yaml.safe_load` + JSON Schema + V1–V8，确保演示路径与真实模型路径完全一致。
+### 3.3 reviewer（阶段 3 / 6a / 8b）
+
+一个 Agent 三道闸门，靠 `payload.mode` 区分；每道闸门只回答一个问题，输出统一为
+`gate` `verdict` `reason_code` `requested_info[]` `checks[]` `quality_scores`（可选 `decision`）。
+
+| 闸门 | 问题 | 合法结论 | 失败时 | 回炉目标 |
+|---|---|---|---|---|
+| `gate1` | 分诊结论能不能用来分流？ | `approve` + `decision=internal\|external` | `needs_info` | `triage:classify` |
+| `gate2` | 修复是否真的被验证通过？ | `approve` | `rework` | `remediation:fix` |
+| `gate3` | 工单是否具备可交付质量？ | `approve` | `needs_info` | `ticketing:create` |
+
+`reject` 在任意闸门都可用（→ 计划里的 `end`，终态 `closed_rejected`）。
+
+#### 机械预检（`checks[i]`，`id` 即契约编号）
+
+| 闸门 | check id | 通过条件 | 失败 `reason_code` |
+|---|---|---|---|
+| gate1 | `evidence_present` | `evidence_count > 0` 或 `key_frames` 非空 | `insufficient_evidence` |
+| gate1 | `triage_confident` | `rca != unknown` 且 `confidence >= 0.70` | `insufficient_evidence` |
+| gate1 | `path_known` | `path ∈ {internal, external}` | `insufficient_evidence` |
+| gate2 | `fix_applied` | `remediation.fixed = true` | `missing_repro` |
+| gate2 | `change_target` | `remediation.target` 非空 | `insufficient_evidence` |
+| gate2 | `verification_present` | `reproduction.mode = verify` 且已执行 | `missing_repro` |
+| gate2 | `fix_verified` | `reproduction.fix_verified = true` | `fix_not_verified` |
+| gate2 | `evidence_present` | `evidence_count >= 2` | `insufficient_evidence` |
+| gate3 | `ticket_status` | `created` / `drafted` / `linked_duplicate` | `insufficient_evidence` |
+| gate3 | `ticket_sections` | `rca` / `repro` / `evidence` 三段都在且非空 | `missing_ticket_sections` |
+| gate3 | `owner_assigned` | `assignee_team` 非空 | `wrong_owner` |
+| gate3 | `duplicate_consistent` | 有 `duplicate_of` 时状态必须是 `linked_duplicate` | `duplicate_ticket` |
+| 全部 | `loop_not_exhausted` | `loop_seq <= MAX_REVIEW_LOOPS` | `loop_exhausted` |
+
+`requested_info` 是给人看的中文补件说明（如"补一次带修复的完整重跑（verify 模式）"），
+回炉时被编排层写进 `requested_focus` 传给上游，上游剧本会把它写进 notes/证据。
+
+### 3.4 remediation（阶段 4a）
+
+| 项 | 内容 |
+|---|---|
+| 命令 / 结果 | `ci.cmd.remediation.fix` / `ci.result.remediation` |
+| 输入 | `rca` `component` `signature` `key_frames[]` `kb_fix_refs[]` `requested_focus` |
+| 输出 | `fixed` `change_type` `target` `diff_summary` `work_item_key` `work_item_url` `risk` `adopted_from_kb` |
+| 剧本 | 按知识库修复方案生成改动 → 提 ADO 工作项 → 记风险 → 交 5a 验证 |
+
+规则：
+
+1. `rca=driver`（产品代码缺陷）不在自动化修复范围 → `fixed=false`，人跟进（闸门 2 会打回/结束）。
+2. 修复形态由组件决定：`ci-infra`/`apt-repo`/`install` → `script`；`toolchain`/`network` → `config`；
+   `test` → `test`；其余 → `data`。
+3. 命中知识库 `fix` 条目则 `adopted_from_kb=<entry_id>`，否则按模板生成。
+4. `requested_focus` 非空（闸门 2 打回）→ 记为"本轮重做"，notes 里带上要求原文。
+
+### 3.5 reproduction（阶段 4b / 5a）
+
+| 项 | 内容 |
+|---|---|
+| 命令 / 结果 | `ci.cmd.reproduction.evidence\|verify` / `ci.result.reproduction` |
+| 输入 | `rca` `component` `signature` `key_frames[]`；`verify` 额外带 `remediation` |
+| 输出 | `mode` `reproducible` `attempts` `matrix[]` `steps_summary[]` `failing_tests[]` `passing_tests[]` `fix_verified` `blocked_reason` `log_excerpt` |
+| 证据 | 每次重跑一条 `repro_log`（UI 可按 attempt 逐次追溯）+ 一条 `repro_plan` |
+
+规则：
+
+1. `evidence`：锁机 → 同参重建 → 复现矩阵（默认 3 次，`REPRO_MAX_RUNS`）→ `reproducible=yes|no|flaky`。
+2. `verify`：应用 4a 改动 → 重跑 → `fix_verified=true|false`（失败时 `reproducible` 保留观测值）。
+3. `rca=infrastructure` 在 `evidence` 模式直接 `Blocked(disabled)`：基础设施类不占重跑机位。
+4. 段内 `raise_blocked` → `Blocked(code, detail)`（如 `source_unavailable` 机位被占用）。
+5. 段内 `sleep_s` → 真 sleep，用于演示"超时 → retryable → 重试耗尽 → blocked"。
+
+### 3.6 regression（阶段 5b / 6c）
+
+| 项 | 内容 |
+|---|---|
+| 命令 / 结果 | `ci.cmd.regression.check\|bisect` / `ci.result.regression` |
+| 输入 | `check`：`reproduction` 的取证结论；`bisect`：额外 `baseline` `change_window` |
+| 输出 | `check`：`is_regression` `baseline` `change_window` `candidates[]`；`bisect`：`bisected` `guilty_patch{commit,pr,author,confidence,rationale}` `notes[]` |
+| 知识库 | `bisect` 未收敛时，把历史同类补丁作为参考写进 `notes` |
+
+规则：
+
+1. 同配置历史基线比对 → `is_regression=true` 则路由 6c（bisect）；`false` 直接建单，工单正文注明"长期环境问题"。
+2. `bisect` 在变更区间内二分；未收敛时 `guilty_patch=null`（闸门 3 仍可过，但工单质量分会降）。
+3. 夹具场景：`default`（回归）/ `no_regression`（跳过 6c）/ `inconclusive`（未收敛）。
+
+### 3.7 ticketing（阶段 7b）
+
+| 项 | 内容 |
+|---|---|
+| 命令 / 结果 | `ci.cmd.ticketing.create` / `ci.result.ticketing` |
+| 输入 | `rca` `path` `reproduction` `regression` `duplicate_of`（可带 `requested_focus`） |
+| 输出 | `backend` `external_key` `url` `ticket_status` `duplicate_of` `priority` `assignee_team` `linked_patches[]` `sections[]` `audit` |
+| 副作用 | 完整 payload 落 `evidence`，闸门 3 靠它复核 |
+
+规则：
+
+1. `TICKET_AUTOCREATE=false` → `ticket_status=drafted`，`external_key=DRAFT-<case前6位>`。
+2. 夹具或上游 `duplicate_of` 非空 → `linked_duplicate`，不另建单。
+3. 优先级：回归且有 guilty patch → `P1`；driver + 可复现 → `P1`；test/environment + 可复现 → `P2`；
+   不可复现或 flaky → `P3`；其余 → `P2`。
+4. `sections` 至少含 `rca` / `repro` / `evidence`（闸门 3 校验），另带 `regression` / `impact` / `next_steps`。
+
+### 3.8 reporting（阶段 9）
+
+| 项 | 内容 |
+|---|---|
+| 命令 / 结果 | `ci.cmd.reporting.case\|daily` / `ci.result.reporting` |
+| 输入 | `case`：`case_id`；`daily`：`day` |
+| 输出 | `case`：`report_md` `metrics` `kb_writes[]`；`daily`：`report_md` `metrics` |
+| 数据源 | 全部是 Postgres（cases / stage_runs / evidence / scans / daily_reports），剧本不做推理 |
+
+`kb_writes` 的生成条件（Agent 只出清单，编排层落 `kb_entries`）：
+
+| 条件 | 条目 `kind` | 摘要内容 |
+|---|---|---|
+| `triage.rca != unknown` | `failure` | rca + 路径 + 置信度 + 分诊备注 |
+| `remediation.fixed = true` | `fix` | change_type → target + diff 摘要 |
+| `regression.guilty_patch.commit` 存在 | `guilty_patch` | commit / PR / author / 依据 |
+
+---
+
+## 4. 证据与写权
+
+| 谁 | 写什么 | 表 |
+|---|---|---|
+| Agent | 动作证据、幂等 claim、阻塞原因 | `evidence`、`msg_dedup` |
+| 编排层 | Case、阶段运行、闸门结论、修复、验证、回归、工单、知识库条目 | `cases` `stage_runs` `reviews` `remediations` `verifications` `regressions` `tickets` `kb_entries` |
+
+证据 `kind`：`scan` / `triage` / `review` / `fix` / `repro_plan` / `repro_log` / `regression` / `ticket` / `report` / `blocked`。
+一条动作一条证据，`payload` 里带夹具场景名，便于"这条结论是哪份夹具出的"。
+
+---
+
+## 5. 幂等与可靠性（四层）
+
+| 层 | 机制 | 重复时 |
+|---|---|---|
+| 消息级 | `msg_dedup` 按 `idempotency_key` claim | 直接 ack，不重跑 |
+| 阶段级 | `stage_runs` 判 `already_done` | 复用已有结果重新发布 |
+| 副作用级 | 工单/复现动作先查 backref（`tickets.external_key`） | 返回已有键，不重复建 |
+| 发布级 | 先 publish 拿 confirm，再 ack | 发布失败不 ack → broker redeliver |
+
+**毒消息**：schema 不合法、`mode` 不属于本 stage、TTL 过期无法处理 → `nack(requeue=False)` →
+`ci.dlx` → `q.dlq`（编排层 `_dlq_reason` 二次判定原因并落库）。
+**业务阻塞**：`Blocked` 是正常结论，走 `status=blocked` 的 result，不进 DLQ。
+
+---
+
+## 6. 夹具清单
+
+| 目录 | 场景 | 演示什么 |
+|---|---|---|
+| `ci_feed/` | `default` `new_failure` `many_errors` `mixed` `all_success` `known_issue_noise` `duplicate` `duplicate_merge` `flaky_unstable` `aborted_infra` `blocked_no_machine` `timeout` `not_reproducible` `needs_info` `reject` `insufficient` `unknown_low_confidence` `llm_warming` `llm_invalid` | Monitor 的签名/去噪/抑制 + 端到端各分支入口 |
+| `triage/` | `rules.json`（组件→rca/路径/置信度表）、`scenarios.json`、`sample_failure.log` | 分类的确定性规则 |
+| `reviewer/` | `default` `gate1_internal` `gate1_external` `gate1_reject` `gate2_rework` `gate3_needs_info` | 三道闸门的各结论与回炉 |
+| `remediation/` | `default` `insufficient` `rollback` | 修复 / 无法修复 / 回退 |
+| `repro/` | `default` `flaky` `not_reproducible` `fixed_not_verified` `blocked_no_machine` `timeout` | 复现矩阵、验证失败、机位占用、超时 |
+| `regression/` | `default` `no_regression` `inconclusive` | 回归 / 跳过 6c / 二分未收敛 |
+| `ticketing/` | `default` `duplicate` | 正常建单 / 关联重复单 |
+| `reporting/` | `template.md` | 日报模板 |
+| `plans/` | `internal_ok` `external_ok` `invalid_stage` `invalid_order` | LLM 兜底：合法两份 + 非法两份 |
+| `kb/` | `entries.json` | 2 / 4a / 6c 三处检索、9 回写 |
+
+---
+
+## 7. 离线自检（`ci-selfcheck`）
+
+不连 MQ/DB，用 `MemoryDB` + `Fixtures` 直接构造 `Ctx`，对 13 个 mode 逐一断言：
+
+```
+13 个 mode × 场景（默认 + 每个分支夹具）→ 输出形状 / 结论词 / 证据条数 / 阻塞码
+19 份 CI feed                         → 观测条数、抑制原因、promoted_reason
+计划契约与语义                        → V0–V9、workflow 命中、LLM 夹具、degraded 安全网
+```
+
+`selfcheck` 的 `MOCK_DELAY_MS` 固定为 `"0:0"`（只能是 `lo:hi` 形式，写成 `0-0` 会静默回落到默认 `150:500`），
+所以 144 项断言总耗时 < 1s；超时用例靠夹具里的 `sleep_s=45` 制造真实超时。
+
+---
+
+## 8. 换真实实现要改哪里
+
+| Agent | 替换点 |
+|---|---|
+| monitor | `_load_feed` → Jenkins REST（`builds` / `wfapi` + JUnit），签名算法不变 |
+| triage | LogDistiller 之后接模型判定；知识库换向量检索 |
+| reviewer | 机械预检保留（它是护栏），模型只填 `quality_scores` 与 `notes` |
+| remediation | git 工作区改动 + ADO REST + 变更审批流 |
+| reproduction | Jenkins Lockable Resources 锁机 + 触发重跑 + 抓 console + 指纹比对 |
+| regression | 基线库查询 + 逐提交触发流水线二分 + 提交元数据关联 |
+| ticketing | Jira REST（`POST /issue`、issue links） |
+| reporting | 报告模板与推送渠道（邮件/IM），`kb_writes` 逻辑不变 |
+
+剧本签名（`handler(ctx) -> dict`）与契约（`stage-contracts.json`）都不变 —— 换的是数据来源，不是骨架。
+
+---
+
+## 9. 环境变量
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `SVC` | `unknown` | 单元名（日志/指标维度，如 `agent-triage`） |
+| `MOCK_SCENARIO` | `default` | 剧本分支（命令可用 `scenario_hint` 覆盖） |
+| `MOCK_DELAY_MS` | `150:500` | 模拟耗时区间（`lo:hi` 毫秒） |
+| `MOCK_FAILURE_RATE` | `0.0` | 注入随机失败，验证重试与 DLQ |
+| `NOISE_THRESHOLD` | `0.85` | triage/monitor 噪声抑制阈值 |
+| `REPRO_ENABLED` / `REPRO_MAX_RUNS` | `true` / `3` | 复现开关与重跑上限 |
+| `TICKET_BACKEND` / `TICKET_AUTOCREATE` | `jira-mock` / `true` | 工单后端与是否真建单 |
+| `MAX_REVIEW_LOOPS` | `2` | 闸门回炉上限（与编排层同名） |
+
+完整清单见 `common/config.py`。
+
+---
+
+相关文档：[01 架构总览](01-架构总览.md) · [02 消息总线与消息契约](02-消息总线与消息契约.md) ·
+[03 编排层设计](03-编排层LangGraph设计.md) · [05 数据模型与部署演示](05-数据模型与部署演示.md)
