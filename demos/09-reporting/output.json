@@ -1,0 +1,114 @@
+{
+  "case_id": "demo-case-external",
+  "day": "2026-11-27",
+  "report_md": "# Case 结案报告 demo-case-external\n\n## 结论摘要\n- 状态：**reported**（signal=error，job=os-staging-test#1223）\n- 签名：`driver:crash:877804487963`\n- 根因：**driver**（置信度 0.82，组件 driver，OS 阶段 staging-test）\n- 分流：**external**（闸门 1 approve，分诊预判 external）\n- 修复：未走修复路径或修复未成形（闸门 2 None）\n- 复现取证：yes（2 次）；验证：fix_verified=None\n- 回归：is_regression=True，guilty patch=a1b2c3d\n- 工单：created OST-1654（P1 / OS-Driver，闸门 3 approve）\n- 计划来源：workflow / s2_full_external\n\n## 阶段执行\n| 阶段 | 状态 | 用时 | 尝试 |\n| --- | --- | --- | --- |\n| 2 Triage 分诊（classify） | done | 120 ms | 1 |\n| 3/6a/8b Reviewer 闸门（gate1, gate3） | done | 240 ms | 1 |\n| 4b/5a 复现与验证（evidence） | done | 120 ms | 1 |\n| 5b/6c 回归判定与定位（bisect, check） | done | 240 ms | 1 |\n| 7b Ticketing 建单（create） | done | 120 ms | 1 |\n\n端到端用时（各阶段累计）：960 ms\n\n## 证据链\n- `log_excerpt` → db://evidence/1（monitor）：Started by upstream project os-staging-test #1221 ⏎ Running on sut-gfx1151-01 (locked) in /tmp/ws-9f2c/os-staging-test ⏎ [checkout] Cloning branch mas\n- `distilled_log` → db://evidence/2（triage）：[stage: kernel-mode-suite] 运行 gfx1151 kernel-mode 用例集（12 例） ⏎ amdgpu 0000:61:00.0: GPU page fault at 0x7f10c0000000, vmid 1 ⏎ amdgpu: failed to proces\n- `kb_lookup` → db://evidence/3（triage）：KB-ISSUE-001 [failure/driver] amdgpu 页错误在低显存机型上族内复发，历史上与 6.8 内核补丁相关（score=5） ⏎ KB-PATCH-001 [guilty_patch/driver] 历史 guilty patch：queue.c 的 smu_ops 未初\n- `skill_card` → db://evidence/4（triage）：# SKILL: driver-failure-triage（驱动类失败分诊） ⏎  ⏎ 适用签名族：`driver:*`（driver:crash / driver:unknown）。典型 job：`os-staging-test`、`os-staging-image` 的 kernel-mode\n- `triage_note` → db://evidence/5（triage）：签名族 driver:crash（签名 driver:crash:877804487963）：错误簇集中在 driver 侧，根因判定 driver，置信度 0.82。 ⏎ 排除 test / environment 类：蒸馏段内未见对应特征行（参考 SKILL 卡片 driver-failure-\n- `review_record` → db://evidence/6（reviewer）：闸门 gate1（第 1 轮）：approve（ok），decision=external ⏎ PASS #1 evidence_present：证据 5 条，关键帧 5 条 ⏎ PASS #2 triage_confident：rca=driver，置信度 0.82 ⏎ PASS #3 path_\n- `repro_log` → db://evidence/7（reproduction）：attempt 1: fail ⏎ os=sut-target-os 24.04 ⏎ config=default ⏎ signature=driver:crash:877804487963\n- `repro_log` → db://evidence/8（reproduction）：attempt 2: fail ⏎ os=sut-target-os 24.04 ⏎ config=default ⏎ signature=driver:crash:877804487963\n- `repro_plan` → db://evidence/9（reproduction）：case=demo-case-external ⏎ mode=evidence ⏎ rca=driver ⏎ signature=driver:crash:877804487963 ⏎ attempts=2 ⏎ reproducible=yes ⏎ fix_verified=None ⏎ scena\n- `regression_check` → db://evidence/10（regression）：case=demo-case-external job=os-staging-test#1223 rca=driver ⏎ 复现结论=yes（attempts=2） ⏎ 基线=staging-pass-2026-11-24 变更区间=a1b2c3d..f4e5d6a ⏎ is_regression=\n- `regression_bisect` → db://evidence/11（regression）：case=demo-case-external job=os-staging-test#1223 rca=driver ⏎ bisected=True ⏎ guilty_patch=a1b2c3d（PR-1187 / wang.lei，confidence=0.86） ⏎ rationale: 在 \n- `ticket_payload` → db://evidence/12（ticketing）：{ ⏎   \"external_key\": \"OST-1654\", ⏎   \"url\": \"http://jira.mock/browse/OST-1654\", ⏎   \"status\": \"created\", ⏎   \"priority\": \"P1\", ⏎   \"assignee_team\": \"\n- `review_record` → db://evidence/13（reviewer）：闸门 gate3（第 1 轮）：approve（ok） ⏎ PASS #1 ticket_status：ticket_status=created，external_key=OST-1654 ⏎ PASS #2 ticket_sections：缺失或为空的段落：无 ⏎ PASS #3 owner_a\n\n## 未解决项\n- Case 终态 reported：已闭环\n\n## 分诊要点\n- 签名族 driver:crash（签名 driver:crash:877804487963）：错误簇集中在 driver 侧，根因判定 driver，置信度 0.82。\n- 排除 test / environment 类：蒸馏段内未见对应特征行（参考 SKILL 卡片 driver-failure-triage）。\n- 归属 OS 阶段 staging-test（job os-staging-test），影响 staging 流水线该环节。\n- 路径预判：external —— 组件 driver 归属 产品/环境侧，预判走 external 路径（最终由闸门 1 决策）。\n\n## 知识库回写\n- [failure] driver：rca=driver，路径=external，置信度=0.82；签名族 driver:crash（签名 driver:crash:877804487963）：错误簇集中在 driver 侧，根因判定 driver，置信度 0.82。\n- [guilty_patch] driver：a1b2c3d（PR-1187 / wang.lei）：在 a1b2c3d 上复现、在其父提交上通过；改动引入 smu_ops 未初始化\n- [best_practice] driver：该路径（external）通过闸门复核：gate2=None，gate3=approve",
+  "metrics": {
+    "case_id": "demo-case-external",
+    "status": "reported",
+    "signal": "error",
+    "job": "os-staging-test",
+    "build": 1223,
+    "signature": "driver:crash:877804487963",
+    "plan_source": "workflow",
+    "workflow_key": "s2_full_external",
+    "path": "external",
+    "rca": "driver",
+    "confidence": 0.82,
+    "verdicts": {
+      "gate1": "approve",
+      "gate2": "None",
+      "gate3": "approve"
+    },
+    "fix_verified": null,
+    "reproducible": "yes",
+    "is_regression": true,
+    "guilty_patch": "a1b2c3d",
+    "ticket_status": "created",
+    "ticket_key": "OST-1654",
+    "ticket_priority": "P1",
+    "stages": [
+      {
+        "stage": "monitor",
+        "mode": "scan",
+        "status": "done",
+        "ms": 120,
+        "attempt": 1
+      },
+      {
+        "stage": "triage",
+        "mode": "classify",
+        "status": "done",
+        "ms": 120,
+        "attempt": 1
+      },
+      {
+        "stage": "reviewer",
+        "mode": "gate1",
+        "status": "done",
+        "ms": 120,
+        "attempt": 1
+      },
+      {
+        "stage": "reproduction",
+        "mode": "evidence",
+        "status": "done",
+        "ms": 120,
+        "attempt": 1
+      },
+      {
+        "stage": "regression",
+        "mode": "check",
+        "status": "done",
+        "ms": 120,
+        "attempt": 1
+      },
+      {
+        "stage": "regression",
+        "mode": "bisect",
+        "status": "done",
+        "ms": 120,
+        "attempt": 1
+      },
+      {
+        "stage": "ticketing",
+        "mode": "create",
+        "status": "done",
+        "ms": 120,
+        "attempt": 1
+      },
+      {
+        "stage": "reviewer",
+        "mode": "gate3",
+        "status": "done",
+        "ms": 120,
+        "attempt": 1
+      }
+    ],
+    "tat_ms": 960,
+    "evidence_count": 13,
+    "unresolved_count": 1
+  },
+  "kb_writes": [
+    {
+      "kind": "failure",
+      "component": "driver",
+      "signature": "driver:crash:877804487963",
+      "summary": "rca=driver，路径=external，置信度=0.82；签名族 driver:crash（签名 driver:crash:877804487963）：错误簇集中在 driver 侧，根因判定 driver，置信度 0.82。",
+      "case_id": "demo-case-external"
+    },
+    {
+      "kind": "guilty_patch",
+      "component": "driver",
+      "signature": "driver:crash:877804487963",
+      "summary": "a1b2c3d（PR-1187 / wang.lei）：在 a1b2c3d 上复现、在其父提交上通过；改动引入 smu_ops 未初始化",
+      "case_id": "demo-case-external"
+    },
+    {
+      "kind": "best_practice",
+      "component": "driver",
+      "signature": "driver:crash:877804487963",
+      "summary": "该路径（external）通过闸门复核：gate2=None，gate3=approve",
+      "case_id": "demo-case-external"
+    }
+  ]
+}

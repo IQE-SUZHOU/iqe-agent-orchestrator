@@ -1,0 +1,55 @@
+{
+  "case_id": "demo-case-external",
+  "rca": "driver",
+  "path": "external",
+  "component": "driver",
+  "os_stage": "staging-test",
+  "signature": "driver:crash:877804487963",
+  "duplicate_of": null,
+  "confidence": 0.82,
+  "key_frames": [
+    "amdgpu: failed to process VM fault on ring gfx_0 (retry 1/3)",
+    "[  412.881203] Kernel panic - not syncing: Fatal exception in interrupt",
+    "dmesg 尾部：Oops 发生在 resume 之后 3s，模块版本 24.04.1",
+    "Finished: FAILURE",
+    "[stage: kernel-mode-suite] 运行 gfx1151 kernel-mode 用例集（12 例）"
+  ],
+  "routed_reason": "组件 driver 归属 产品/环境侧，预判走 external 路径（最终由闸门 1 决策）",
+  "kb_refs": [
+    "KB-ISSUE-001",
+    "KB-PATCH-001"
+  ],
+  "triage_notes": [
+    "签名族 driver:crash（签名 driver:crash:877804487963）：错误簇集中在 driver 侧，根因判定 driver，置信度 0.82。",
+    "排除 test / environment 类：蒸馏段内未见对应特征行（参考 SKILL 卡片 driver-failure-triage）。",
+    "归属 OS 阶段 staging-test（job os-staging-test），影响 staging 流水线该环节。",
+    "路径预判：external —— 组件 driver 归属 产品/环境侧，预判走 external 路径（最终由闸门 1 决策）。",
+    "知识库命中 KB-ISSUE-001, KB-PATCH-001，闸门 1 可分诊时引用历史结论。"
+  ],
+  "evidence": [
+    {
+      "kind": "distilled_log",
+      "uri": "db://evidence/2",
+      "note": "LogDistiller logdistiller-mock/v1：779B → 549B（保留 9 行）"
+    },
+    {
+      "kind": "kb_lookup",
+      "uri": "db://evidence/3",
+      "note": "知识库命中 2 条（KB-ISSUE-001, KB-PATCH-001）"
+    },
+    {
+      "kind": "skill_card",
+      "uri": "db://evidence/4",
+      "note": "SKILL 卡片 driver-failure-triage（前 800 字）"
+    },
+    {
+      "kind": "triage_note",
+      "uri": "db://evidence/5",
+      "note": "分诊结论要点（供闸门 1、工单与报告引用）"
+    }
+  ],
+  "skill_refs": [
+    "driver-failure-triage"
+  ],
+  "llm_calls": 0
+}

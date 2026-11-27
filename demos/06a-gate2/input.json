@@ -1,0 +1,98 @@
+{
+  "case_id": "demo-case-internal",
+  "build": 1243,
+  "source": "mock-jenkins",
+  "job": "os-staging-image",
+  "rca": "environment",
+  "component": "toolchain",
+  "signature": "toolchain:compile-error:26e973278578",
+  "key_frames": [
+    "src/copy_engine.c:212:7: error: undefined reference to 'gfx_copy_engine_flush'",
+    "src/copy_engine.c:219:11: error: 'copy_ctx' undeclared (first use in this function)",
+    "Finished: FAILURE",
+    "[stage: compile-userspace-lib] make -C userspace all",
+    "gcc -O2 -fno-strict-aliasing -Iinclude -c src/copy_engine.c -o obj/copy_engine.o"
+  ],
+  "signal": "error",
+  "path": "internal",
+  "confidence": 0.72,
+  "evidence_count": 12,
+  "loop_seq": 1,
+  "requested_focus": null,
+  "remediation": {
+    "case_id": "demo-case-internal",
+    "fixed": true,
+    "change_type": "script",
+    "target": "ci/scripts/staging_install.sh",
+    "diff_summary": "在安装步骤前清理残留 workspace 并重装依赖；失败时回退到上一版脚本",
+    "work_item_key": "ADO-4821",
+    "work_item_url": "http://ado.mock/_workitems/edit/4821",
+    "risk": "low",
+    "adopted_from_kb": "KB-FIX-002",
+    "notes": [
+      "修复来源：知识库 KB-FIX-001（同类问题曾以相同方式修复）",
+      "采纳知识库修复方案 KB-FIX-002（cc1plus 编译失败：补 -march 兼容参数或固定 toolchain 版本），改动落到 ci/scripts/staging_install.sh"
+    ],
+    "evidence": [
+      {
+        "kind": "remediation_plan",
+        "uri": "db://evidence/8",
+        "note": "4a 修复已生成：ci/scripts/staging_install.sh（script/low）"
+      }
+    ]
+  },
+  "reproduction": {
+    "case_id": "demo-case-internal",
+    "mode": "verify",
+    "reproducible": "yes",
+    "attempts": 3,
+    "matrix": [
+      {
+        "os": "sut-target-os 24.04",
+        "config": "patched",
+        "outcome": "pass"
+      },
+      {
+        "os": "sut-target-os 24.04",
+        "config": "patched",
+        "outcome": "pass"
+      },
+      {
+        "os": "sut-target-os 24.04",
+        "config": "patched",
+        "outcome": "pass"
+      }
+    ],
+    "steps_summary": [
+      "应用 4a 的脚本/配置修复",
+      "原参数重跑同一用例集三次",
+      "比对失败签名：原错误簇未再出现",
+      "登记修复前后证据"
+    ],
+    "failing_tests": [],
+    "passing_tests": [
+      "kernel-mode/queue_reinit",
+      "kernel-mode/smu_ops"
+    ],
+    "fix_verified": true,
+    "new_evidence": [
+      {
+        "kind": "repro_log",
+        "uri": "db://evidence/9",
+        "note": "[verify] attempt 1 → pass"
+      },
+      {
+        "kind": "repro_log",
+        "uri": "db://evidence/10",
+        "note": "[verify] attempt 2 → pass"
+      },
+      {
+        "kind": "repro_log",
+        "uri": "db://evidence/11",
+        "note": "[verify] attempt 3 → pass"
+      }
+    ],
+    "blocked_reason": null,
+    "log_excerpt": "verify attempt 1: 12/12 通过\nverify attempt 2: 12/12 通过\nverify attempt 3: 12/12 通过，无 amdgpu page fault"
+  }
+}

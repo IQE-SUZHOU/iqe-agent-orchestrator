@@ -1,0 +1,54 @@
+{
+  "case_id": "demo-case-internal",
+  "mode": "verify",
+  "reproducible": "yes",
+  "attempts": 3,
+  "matrix": [
+    {
+      "os": "sut-target-os 24.04",
+      "config": "patched",
+      "outcome": "pass"
+    },
+    {
+      "os": "sut-target-os 24.04",
+      "config": "patched",
+      "outcome": "pass"
+    },
+    {
+      "os": "sut-target-os 24.04",
+      "config": "patched",
+      "outcome": "pass"
+    }
+  ],
+  "steps_summary": [
+    "应用 4a 的脚本/配置修复",
+    "原参数重跑同一用例集三次",
+    "比对失败签名：原错误簇未再出现",
+    "登记修复前后证据"
+  ],
+  "failing_tests": [],
+  "passing_tests": [
+    "kernel-mode/queue_reinit",
+    "kernel-mode/smu_ops"
+  ],
+  "fix_verified": true,
+  "new_evidence": [
+    {
+      "kind": "repro_log",
+      "uri": "db://evidence/9",
+      "note": "[verify] attempt 1 → pass"
+    },
+    {
+      "kind": "repro_log",
+      "uri": "db://evidence/10",
+      "note": "[verify] attempt 2 → pass"
+    },
+    {
+      "kind": "repro_log",
+      "uri": "db://evidence/11",
+      "note": "[verify] attempt 3 → pass"
+    }
+  ],
+  "blocked_reason": null,
+  "log_excerpt": "verify attempt 1: 12/12 通过\nverify attempt 2: 12/12 通过\nverify attempt 3: 12/12 通过，无 amdgpu page fault"
+}

@@ -1,0 +1,54 @@
+{
+  "case_id": "demo-case-external",
+  "gate": "gate3",
+  "verdict": "approve",
+  "decision": "none",
+  "reason_code": "ok",
+  "requested_info": [],
+  "checks": [
+    {
+      "id": "ticket_status",
+      "name": "工单已创建或已关联",
+      "pass": true,
+      "detail": "ticket_status=created，external_key=OST-1654",
+      "reason_code": null
+    },
+    {
+      "id": "ticket_sections",
+      "name": "工单包含 rca / repro / evidence 且非空",
+      "pass": true,
+      "detail": "缺失或为空的段落：无",
+      "reason_code": null
+    },
+    {
+      "id": "owner_assigned",
+      "name": "责任团队已指派",
+      "pass": true,
+      "detail": "assignee_team=OS-Driver，priority=P1",
+      "reason_code": null
+    },
+    {
+      "id": "duplicate_consistent",
+      "name": "重复工单关系自洽",
+      "pass": true,
+      "detail": "ticket_status=created，duplicate_of=None",
+      "reason_code": null
+    },
+    {
+      "id": "loop_not_exhausted",
+      "name": "回炉轮次 <= 2",
+      "pass": true,
+      "detail": "当前第 1 轮（上限 2 轮）",
+      "reason_code": null
+    }
+  ],
+  "quality_scores": {
+    "evidence": 1.0,
+    "consistency": 1.0,
+    "path": 1.0,
+    "checks_passed": 5,
+    "checks_total": 5,
+    "overall": 1.0
+  },
+  "notes": "根因、复现、补丁、责任人齐备；第 1 轮机械预检 5/5 通过；结论 approve（ok）"
+}

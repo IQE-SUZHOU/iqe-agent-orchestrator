@@ -1,7 +1,13 @@
-"""端到端（集成）测试：覆盖 Monitor 的每一类场景（无报错 / 新失败 / 已知噪声 / 重复 /
-Flaky / infra 中断 / 大量失败 / 源不可用），并校验下游链路、回炉、幂等、DLQ、计划兜底。
+"""端到端（集成）测试：覆盖 8 Agent × 13 mode 的 12 阶段两分支三闸门。
 
-前置：编排层与 6 个 Agent 已在跑（本机 scripts/run_local.sh 或 k8s 部署），
+用例分四层：
+
+1. **Monitor 场景矩阵**（19 个 ci_feed 夹具）：计数、建 Case 数、终态；
+2. **链路形态**：观察链（s1）/ 外部分支（s2 全链）/ 内部分支 / 测试免复现（s3）；
+3. **三道闸门**：gate1 回炉与驳回、gate3 工单质量、timeout 与 blocked；
+4. **计划层 / 幂等 / DLQ / 重放 / API / Web UI**。
+
+前置：编排层与 8 个 Agent 已在跑（本机 scripts/run_local.sh 或 k8s 部署），
 且环境变量 ORCH_BASE_URL / PG_DSN 指向它。凭据从 deploy/secrets.env 来，不在代码里写死。
 
     # 本机栈
@@ -23,15 +29,15 @@ import requests
 
 pytestmark = pytest.mark.integration
 
-pytestmark = pytest.mark.integration
-
 BASE = os.environ.get("ORCH_BASE_URL", "http://127.0.0.1:8080")
 PG = os.environ.get("PG_DSN", "postgresql://postgres@127.0.0.1:5432/ci_triage")
 TERMINAL = {"closed", "closed_rejected", "blocked"}
 
 
 def api(path: str, **kw) -> Any:
-    r = requests.request(kw.pop("method", "GET"), f"{BASE}{path}", timeout=120, **kw)
+    # 扫描类接口 wait=true 会一直等到 Case 终态（timeout 场景要 2 分钟以上），允许单点放宽超时
+    timeout = kw.pop("timeout", 120)
+    r = requests.request(kw.pop("method", "GET"), f"{BASE}{path}", timeout=timeout, **kw)
     if r.status_code >= 400:
         raise AssertionError(f"{path} -> {r.status_code}: {r.text[:400]}")
     return r.json() if "json" in r.headers.get("content-type", "") else r.text
@@ -70,7 +76,10 @@ def q1(sql: str, *args) -> dict | None:
 
 def trigger_scan(scenario: str) -> dict:
     res = api(
-        "/api/scan", method="POST", json={"scenario": scenario, "lookback": "24h", "wait": True}
+        "/api/scan",
+        method="POST",
+        json={"scenario": scenario, "lookback": "24h", "wait": True},
+        timeout=300,
     )
     assert res["status"] in ("done", "blocked"), res
     return res
@@ -89,12 +98,45 @@ def wait_cases(scan_id: str, expect: int, timeout_s: int = 240) -> list[dict]:
     )
 
 
-def stages_of(case_id: str) -> list[str]:
-    rows = q(
-        "select stage, status, step_id, attempt, error from stage_runs where case_id=$1 order by id",
+def runs_of(case_id: str) -> list[dict]:
+    return q(
+        "select stage, mode, step_id, attempt, status, error, output"
+        " from stage_runs where case_id=$1 order by id",
         case_id,
     )
-    return [r["stage"] for r in rows]
+
+
+def stages_of(case_id: str) -> list[str]:
+    return [r["stage"] for r in runs_of(case_id)]
+
+
+def path_of(case_id: str) -> list[tuple[str, str]]:
+    """实际执行过的 (stage, mode) 序列——分支是否正确，看这个。"""
+    return [(r["stage"], r["mode"]) for r in runs_of(case_id)]
+
+
+def output_of(case_id: str, stage: str, mode: str | None = None) -> dict:
+    rows = [r for r in runs_of(case_id) if r["stage"] == stage]
+    if mode:
+        rows = [r for r in rows if r["mode"] == mode]
+    assert rows, f"{case_id} 没有 {stage}:{mode} 的执行记录"
+    return rows[-1]["output"] or {}
+
+
+def reviews_of(case_id: str, gate: str | None = None) -> list[dict]:
+    # reviews 表只有 verdict/reason_code/checks/quality/loop_seq；decision 在 reviewer 的阶段输出里
+    sql = "select gate, verdict, reason_code, loop_seq, checks from reviews where case_id=$1"
+    rows = q(sql + " order by id", case_id)
+    return [r for r in rows if r["gate"] == gate] if gate else rows
+
+
+def gate_outputs(case_id: str, gate: str) -> list[dict]:
+    """reviewer 每次过闸门的完整输出（decision/quality_scores 只在这里）。"""
+    return [
+        r["output"] or {}
+        for r in runs_of(case_id)
+        if r["stage"] == "reviewer" and r["mode"] == gate
+    ]
 
 
 def trace_rows(case_id: str) -> list[dict]:
@@ -256,44 +298,48 @@ def test_monitor_scenario_end_to_end(scenario: str):
 
 
 # --------------------------------------------------------------------------- 链路形态（关键设计断言）
-def test_s1_lite_has_no_reproduction_command():
-    """无报错：只走 Monitor + Triage，绝不出现下游命令。"""
+def test_s1_observe_only_stops_after_triage_and_reporting():
+    """无报错（signal=none）：只走 Triage → Reporting，绝不出现下游命令。"""
     res = trigger_scan("all_success")
     rows = wait_cases(res["scan_id"], 3)
     for c in rows:
-        st = stages_of(c["case_id"])
-        assert st == ["triage"], f"S1 链路应只有 triage，实际 {st}"
         assert c["status"] == "closed", c["blocked_reason"]
-        assert c["progress"]["workflow_key"] == "s1_lite", c["progress"]
-        # 三态结论：无新失败
-        out = q1("select output from stage_runs where case_id=$1 and stage='triage'", c["case_id"])[
-            "output"
-        ]
+        assert c["progress"]["workflow_key"] == "s1_observe_only", c["progress"]
+        assert path_of(c["case_id"]) == [("triage", "classify"), ("reporting", "case")]
+        out = output_of(c["case_id"], "triage", "classify")
         assert (
             out["rca"] == "unknown"
         ), out  # 契约枚举：driver/test/environment/infrastructure/unknown
-        assert out["repro_eligible"] is False, out  # 无报错 ⇒ 不占用复现机位
+        # 无报错 ⇒ 计划只有 2 步，不占用复现机位
+        assert [x["mode"] for x in c["progress"]["plan_steps"]] == ["classify", "case"]
         assert out["confidence"] < 0.7, out
 
 
-def test_s2_full_runs_all_six_agents_in_order():
-    """含报错：Monitor → Triage → Reproduction → Ticket → Review → Reporting 全链。"""
+def test_s2_full_external_branch_runs_all_stages_in_order():
+    """含报错 + 产品侧缺陷：闸门 1 判 external → 取证 → 回归 → 建单 → 闸门 3 → 报告。"""
     res = trigger_scan("new_failure")
     err = next(r for r in wait_cases(res["scan_id"], 3) if r["signal"] == "error")
-    stages = [
-        r["stage"]
-        for r in q("select stage from stage_runs where case_id=$1 order by id", err["case_id"])
-    ]
-    assert stages == ["triage", "reproduction", "ticket", "review", "reporting"], stages
     assert err["progress"]["workflow_key"] == "s2_full"
-    assert err["status"] == "closed"
+    assert err["status"] == "closed", err["blocked_reason"]
+    assert path_of(err["case_id"]) == [
+        ("triage", "classify"),
+        ("reviewer", "gate1"),
+        ("reproduction", "evidence"),
+        ("regression", "check"),
+        ("regression", "bisect"),
+        ("ticketing", "create"),
+        ("reviewer", "gate3"),
+        ("reporting", "case"),
+    ], path_of(err["case_id"])
+
+    gate1 = reviews_of(err["case_id"], "gate1")[-1]
+    assert gate1["verdict"] == "approve", gate1
+    assert gate_outputs(err["case_id"], "gate1")[-1]["decision"] == "external", gate1
+    gate3 = reviews_of(err["case_id"], "gate3")[-1]
+    assert gate3["verdict"] == "approve", gate3
+
     tk = q1("select * from tickets where case_id=$1", err["case_id"])
     assert tk and tk["ticket_status"] in ("created", "linked_duplicate"), tk
-    rv = q1(
-        "select verdict from reviews where case_id=$1 order by loop_seq desc limit 1",
-        err["case_id"],
-    )
-    assert rv["verdict"] == "approve", rv
     assert q(
         "select 1 from stage_runs where case_id=$1 and stage='reporting' and status='done'",
         err["case_id"],
@@ -315,30 +361,40 @@ def test_known_issue_noise_is_suppressed_with_evidence():
     assert all(o.get("promoted_reason") is None for o in sup), "被抑制的观测不应有 promoted_reason"
 
 
-def test_duplicate_merge_creates_one_case_with_merge_note():
+def test_duplicate_merge_creates_one_case_and_skips_controlled_repro():
     res = trigger_scan("duplicate_merge")
     row = wait_cases(res["scan_id"], 1)[0]
     assert res["counts"]["suppressed"] == 3
-    sig = row["signature"]
-    assert sig.startswith("test:"), sig
+    assert row["signature"].startswith("test:"), row["signature"]
     obs = (row["payload"] or {})["observation"]
     assert obs["context"].get("duplicate_merge_count", 0) >= 2, obs["context"]
     assert obs["context"].get("duplicate_builds"), obs["context"]
-    # 注册表匹配 test:* 家族 → 不占重跑机位
-    assert row["progress"]["workflow_key"] == "s4_test_no_repro", row["progress"]
-    assert "reproduction" not in stages_of(row["case_id"])
+    # 注册表匹配 test:* 家族 → 跳过 4b 受控复现，只走内部修复链的 5a 验证
+    assert row["progress"]["workflow_key"] == "s3_test_no_repro", row["progress"]
+    assert path_of(row["case_id"]) == [
+        ("triage", "classify"),
+        ("reviewer", "gate1"),
+        ("remediation", "fix"),
+        ("reproduction", "verify"),
+        ("reviewer", "gate2"),
+        ("reporting", "case"),
+    ], path_of(row["case_id"])
+    assert row["status"] == "closed", row["blocked_reason"]
 
 
-def test_aborted_infra_skips_reproduction():
+def test_aborted_infra_takes_internal_branch_without_evidence_run():
+    """infra 中断判 internal：走 4a 修复 → 5a verify（不是 4b evidence）。"""
     res = trigger_scan("aborted_infra")
     row = wait_cases(res["scan_id"], 1)[0]
-    triage_out = q1(
-        "select output from stage_runs where case_id=$1 and stage='triage'", row["case_id"]
-    )["output"]
+    triage_out = output_of(row["case_id"], "triage", "classify")
     assert triage_out["rca"] == "infrastructure", triage_out
-    assert row["progress"]["workflow_key"] == "s6_infra_direct", row["progress"]
-    assert "reproduction" not in stages_of(row["case_id"])
-    assert row["status"] == "closed"
+    assert row["progress"]["workflow_key"] == "s2_full", row["progress"]
+    modes = path_of(row["case_id"])
+    assert ("remediation", "fix") in modes, modes
+    assert ("reproduction", "verify") in modes, modes
+    assert ("reproduction", "evidence") not in modes, modes
+    assert ("ticketing", "create") not in modes, modes
+    assert row["status"] == "closed", row["blocked_reason"]
 
 
 def test_flaky_unstable_marks_reproduction_flaky():
@@ -346,39 +402,35 @@ def test_flaky_unstable_marks_reproduction_flaky():
     row = wait_cases(res["scan_id"], 1)[0]
     obs = res["observations"][0]
     assert obs.get("promoted_reason") == "unstable_result", obs
-    out = q1(
-        "select output from stage_runs where case_id=$1 and stage='reproduction'", row["case_id"]
-    )["output"]
+    out = output_of(row["case_id"], "reproduction", "evidence")
     assert out["reproducible"] == "flaky", out
     # 复现矩阵：同参数三次重建，中间一次通过 → 不稳定度（契约字段是 matrix[].outcome）
     outcomes = [m["outcome"] for m in out["matrix"]]
     assert outcomes == ["fail", "pass", "fail"], outcomes
     assert out["attempts"] == 3, out
-    assert row["status"] == "closed"
 
 
-def test_many_errors_respects_inflight_limit_and_all_terminal():
+def test_many_errors_all_terminal_and_signatures_distinct():
     res = trigger_scan("many_errors")
     rows = wait_cases(res["scan_id"], 5, timeout_s=300)
     assert len(rows) == 5
     assert all(r["status"] in TERMINAL for r in rows)
     # 五个签名互不相同（不同家族），说明指纹去重没有误并
     assert len({r["signature"] for r in rows}) == 5, [r["signature"] for r in rows]
+    # 内部/外部两条分支都出现过：environment 类（0.72）也能过闸门 1
+    modes = {m for r in rows for m in path_of(r["case_id"])}
+    assert ("remediation", "fix") in modes and ("reproduction", "evidence") in modes, modes
 
 
 def test_reproduction_blocked_case_ends_blocked():
     res = trigger_scan("blocked_no_machine")
     row = wait_cases(res["scan_id"], 1)[0]
     assert row["status"] == "blocked", row["blocked_reason"]
-    runs = q(
-        "select stage, status, attempt, error from stage_runs where case_id=$1 order by id",
-        row["case_id"],
-    )
+    runs = runs_of(row["case_id"])
     repro = [r for r in runs if r["stage"] == "reproduction"]
     assert repro and repro[0]["status"] == "blocked", repro
     assert (repro[0]["error"] or {}).get("code") == "source_unavailable", repro
-    assert "ticket" not in [r["stage"] for r in runs], "blocked 后不应继续下游"
-    assert "回炉" not in (row["blocked_reason"] or "")
+    assert "ticketing" not in [r["stage"] for r in runs], "blocked 后不应继续下游"
 
 
 def test_source_unavailable_scan_is_blocked_and_recoverable():
@@ -391,103 +443,85 @@ def test_source_unavailable_scan_is_blocked_and_recoverable():
     wait_cases(good["scan_id"], 3)
 
 
-# --------------------------------------------------------------------------- 下游 Agent 行为场景
-def test_review_needs_info_loops_back_to_triage_then_approves():
+# --------------------------------------------------------------------------- 三道闸门
+def test_gate1_needs_info_loops_back_to_triage_then_approves():
+    """needs_info 夹具只在第 1 轮生效：回炉重分诊后放行，走完整外部链。"""
     res = trigger_scan("needs_info")
     row = wait_cases(res["scan_id"], 1)[0]
     assert row["status"] == "closed", row["blocked_reason"]
-    stages = [
-        r["stage"]
-        for r in q("select stage from stage_runs where case_id=$1 order by id", row["case_id"])
-    ]
+    stages = stages_of(row["case_id"])
     assert stages.count("triage") == 2, f"应回炉一次重跑 triage：{stages}"
     assert stages[-1] == "reporting", stages
     assert row["progress"]["review_loop_seq"] == 1, row["progress"]
-    verdicts = [
-        r["verdict"]
-        for r in q(
-            "select verdict, loop_seq from reviews where case_id=$1 order by loop_seq",
-            row["case_id"],
-        )
-    ]
-    assert verdicts == ["needs_info", "approve"], verdicts
-    # 回炉时清空下游：ticket 只有一条最新记录
-    assert q(
-        "select 1 from stage_runs where case_id=$1 and stage='review' and attempt=1", row["case_id"]
-    )
+
+    gate1 = reviews_of(row["case_id"], "gate1")
+    assert [r["verdict"] for r in gate1] == ["needs_info", "approve"], gate1
+    assert gate1[0]["reason_code"] == "insufficient_evidence", gate1[0]
+    # 机械预检其实是全通过的，是夹具把结论改严为 needs_info
+    assert all(c["pass"] for c in gate1[0]["checks"]), gate1[0]["checks"]
+    assert gate_outputs(row["case_id"], "gate1")[-1]["decision"] == "external"
+    # 回炉后下游确实重新跑过（不是复用旧结论）
+    assert ("ticketing", "create") in path_of(row["case_id"])
 
 
-def test_review_insufficient_exhausts_loop_and_blocks():
+def test_gate1_insufficient_exhausts_loops_and_rejects():
+    """每轮都判证据不足 → 回炉预算耗尽 → reject(loop_exhausted)。"""
     res = trigger_scan("insufficient")
     row = wait_cases(res["scan_id"], 1)[0]
-    assert row["status"] == "blocked", row["blocked_reason"]
-    assert "回炉" in (row["blocked_reason"] or ""), row["blocked_reason"]
+    assert row["status"] == "closed_rejected", row["blocked_reason"]
     assert row["progress"]["review_loop_seq"] == 2, row["progress"]
-    assert not q("select 1 from stage_runs where case_id=$1 and stage='reporting'", row["case_id"])
+    gate1 = reviews_of(row["case_id"], "gate1")
+    assert [r["verdict"] for r in gate1] == ["needs_info", "needs_info", "reject"], gate1
+    assert gate1[-1]["reason_code"] == "loop_exhausted", gate1[-1]
+    assert "reporting" not in stages_of(row["case_id"])
 
 
-def test_review_reject_closes_without_reporting():
+def test_gate1_reject_closes_without_reporting():
     res = trigger_scan("reject")
     row = wait_cases(res["scan_id"], 1)[0]
     assert row["status"] == "closed_rejected", row["blocked_reason"]
-    stages = [
-        r["stage"]
-        for r in q("select stage from stage_runs where case_id=$1 order by id", row["case_id"])
-    ]
-    assert "reporting" not in stages, stages
-    assert stages[-1] == "review", stages
+    assert path_of(row["case_id"]) == [("triage", "classify"), ("reviewer", "gate1")]
+    assert reviews_of(row["case_id"], "gate1")[-1]["verdict"] == "reject"
 
 
-def test_ticket_duplicate_links_and_reviewer_flags_it():
+def test_gate3_accepts_linked_duplicate_ticket():
+    """ticketing 查重命中 → linked_duplicate；闸门 3 的 duplicate_consistent 必须放行。"""
     res = trigger_scan("duplicate")
     row = wait_cases(res["scan_id"], 1)[0]
     tk = q1("select * from tickets where case_id=$1", row["case_id"])
     assert tk["ticket_status"] == "linked_duplicate" and tk["duplicate_of"], tk
-    checks = q1(
-        "select checks from reviews where case_id=$1 order by loop_seq desc limit 1", row["case_id"]
-    )["checks"]
-    dup_check = next(c for c in checks if c["id"] == "no_duplicate_ticket")
-    assert dup_check["pass"] is False, checks
-    rv = q1(
-        "select verdict from reviews where case_id=$1 order by loop_seq desc limit 1",
-        row["case_id"],
-    )
-    assert rv["verdict"] in ("needs_info", "reject"), rv
+    gate3 = reviews_of(row["case_id"], "gate3")[-1]
+    assert gate3["verdict"] == "approve", gate3
+    check = next(c for c in gate3["checks"] if c["id"] == "duplicate_consistent")
+    assert check["pass"] is True, gate3["checks"]
+    assert row["status"] == "closed", row["blocked_reason"]
 
 
 def test_reproduction_not_reproducible_and_timeout_paths():
     res = trigger_scan("not_reproducible")
     row = wait_cases(res["scan_id"], 1)[0]
-    out = q1(
-        "select output from stage_runs where case_id=$1 and stage='reproduction'", row["case_id"]
-    )["output"]
+    out = output_of(row["case_id"], "reproduction", "evidence")
     assert out["reproducible"] == "no", out
     assert row["status"] in ("closed", "blocked")
 
+    # 夹具 sleep 75s > s2_full 的 e1 timeout_s 60 → 两次都超时 → blocked
     res2 = trigger_scan("timeout")
     row2 = wait_cases(res2["scan_id"], 1, timeout_s=300)[0]
-    runs = q(
-        "select status, attempt from stage_runs where case_id=$1 and stage='reproduction' order by id",
-        row2["case_id"],
-    )
+    runs = [r for r in runs_of(row2["case_id"]) if r["stage"] == "reproduction"]
     assert len(runs) == 2 and all(r["status"] in ("timeout", "late") for r in runs), runs
     assert row2["status"] == "blocked", row2["blocked_reason"]
     assert "timeout" in (row2["blocked_reason"] or "").lower(), row2["blocked_reason"]
 
 
-def test_triage_low_confidence_gates_review():
+def test_triage_low_confidence_gates_gate1():
     res = trigger_scan("unknown_low_confidence")
     row = wait_cases(res["scan_id"], 1)[0]
-    out = q1("select output from stage_runs where case_id=$1 and stage='triage'", row["case_id"])[
-        "output"
-    ]
+    out = output_of(row["case_id"], "triage", "classify")
     assert out["rca"] == "unknown" and out["confidence"] < 0.7, out
-    rv = q1(
-        "select verdict, checks from reviews where case_id=$1 order by loop_seq desc limit 1",
-        row["case_id"],
-    )
-    conf_check = next(c for c in rv["checks"] if c["id"] == "triage_confidence_ok")
-    assert conf_check["pass"] is False, rv["checks"]
+    gate1 = reviews_of(row["case_id"], "gate1")[-1]
+    conf_check = next(c for c in gate1["checks"] if c["id"] == "triage_confident")
+    assert conf_check["pass"] is False, gate1["checks"]
+    assert row["status"] == "closed_rejected", row["blocked_reason"]
 
 
 # --------------------------------------------------------------------------- 计划层（workflow / LLM / 校验器）
@@ -510,11 +544,8 @@ def test_llm_fallback_used_when_registry_has_no_match():
     assert plan["source"] == "llm", plan
     assert plan["rationale"], "LLM 计划必须有 rationale"
     assert plan["degraded"] is False
-    stages = [
-        r["stage"]
-        for r in q("select stage from stage_runs where case_id=$1 order by id", row["case_id"])
-    ]
-    assert "triage" in stages and "review" in stages
+    modes = path_of(row["case_id"])
+    assert ("triage", "classify") in modes and ("reviewer", "gate3") in modes, modes
     assert row["status"] == "closed", row["blocked_reason"]
     assert row["plan_source"] == "llm"
 
@@ -526,11 +557,7 @@ def test_invalid_llm_plan_is_rejected_and_degrades_to_builtin():
     assert plan["degraded"] is True, plan
     assert plan["workflow_key"] == "s2_full", plan
     assert "degraded" in (plan["rationale"] or "").lower(), plan["rationale"]
-    stages = [
-        r["stage"]
-        for r in q("select stage from stage_runs where case_id=$1 order by id", row["case_id"])
-    ]
-    assert "reproduction" in stages, stages
+    assert ("reproduction", "evidence") in path_of(row["case_id"])
     assert row["status"] == "closed", row["blocked_reason"]
 
 
@@ -554,7 +581,12 @@ def test_duplicate_command_is_absorbed_by_idempotency():
     res = api(
         "/api/ops/inject",
         method="POST",
-        json={"kind": "duplicate_command", "stage": "review", "mode": "run", "publish_times": 3},
+        json={
+            "kind": "duplicate_command",
+            "stage": "reviewer",
+            "mode": "gate1",
+            "publish_times": 3,
+        },
     )
     assert res["dlq_rows"] == 0, res
     assert (
@@ -565,7 +597,7 @@ def test_duplicate_command_is_absorbed_by_idempotency():
 
 
 def test_bad_command_goes_to_dlq_with_context():
-    res = api("/api/ops/inject", method="POST", json={"kind": "bad_command", "stage": "review"})
+    res = api("/api/ops/inject", method="POST", json={"kind": "bad_command", "stage": "reviewer"})
     assert res["dlq_rows"] == 1, res
     assert res["evidence_rows"] == 0, "毒消息不能被执行"
     row = q1(
@@ -573,7 +605,9 @@ def test_bad_command_goes_to_dlq_with_context():
         " where idempotency_key=$1",
         res["idempotency_key"],
     )
-    assert row["stage"] == "review" and row["original_routing_key"] == "ci.cmd.review.run", row
+    # 第三段是注入的非法 mode：ci.cmd.reviewer.bogus_mode
+    assert row["stage"] == "reviewer", row
+    assert row["original_routing_key"] == "ci.cmd.reviewer.bogus_mode", row
     assert "contract_violation" in row["reason"] or "expired" in row["reason"], row["reason"]
     assert '"payload"' in row["body"] and '"mode"' in row["body"], row["body"][:200]
 
@@ -597,10 +631,10 @@ def test_api_surface_health_and_stats():
     h = api("/healthz")
     assert h["status"] == "ok" and h["svc"] == "orchestrator"
     s = api("/api/stats")
-    assert s["stages"] and s["cases"]
+    assert s["stages"] and s["cases"] and s["remediations"] and s["regressions"]
     w = api("/api/workflows")
     keys = {x["key"] for x in w["items"]}
-    assert {"s1_lite", "s2_full", "s4_test_no_repro", "s6_infra_direct"} <= keys, keys
+    assert keys == {"s1_observe_only", "s2_full", "s3_test_no_repro"}, keys
     sc = api("/api/scenarios")
     assert "source_unavailable" not in sc["feed_scenarios"], "source_unavailable 必须故意没有夹具"
     metrics = api("/metrics")
@@ -620,7 +654,7 @@ def test_ui_pages_render_with_real_data():
     case_id = err_case["case_id"]
 
     pages = {
-        "/": ["Case 列表", "计划进度", case_id],
+        "/": ["Case 列表", case_id],
         "/ui/plans": ["Workflow 注册表", "已封存计划"],
         "/ui/health": ["Stage 执行情况"],
         f"/ui/cases/{case_id}": ["编排计划", "执行轨迹", "reproduction"],

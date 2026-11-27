@@ -1,0 +1,26 @@
+{
+  "case_id": "demo-case-external",
+  "mode": "bisect",
+  "is_regression": true,
+  "baseline": "staging-pass-2026-11-24",
+  "change_window": "a1b2c3d..f4e5d6a",
+  "bisected": true,
+  "guilty_patch": {
+    "commit": "a1b2c3d",
+    "pr": "PR-1187",
+    "author": "wang.lei",
+    "confidence": 0.86,
+    "rationale": "在 a1b2c3d 上复现、在其父提交上通过；改动引入 smu_ops 未初始化"
+  },
+  "candidates": [],
+  "evidence": [
+    {
+      "kind": "regression_bisect",
+      "uri": "db://evidence/11",
+      "note": "6c 二分定位到 a1b2c3d"
+    }
+  ],
+  "notes": [
+    "二分 3 轮定位到单提交"
+  ]
+}

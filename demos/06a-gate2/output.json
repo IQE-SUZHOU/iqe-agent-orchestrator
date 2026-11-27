@@ -1,0 +1,61 @@
+{
+  "case_id": "demo-case-internal",
+  "gate": "gate2",
+  "verdict": "approve",
+  "decision": "none",
+  "reason_code": "ok",
+  "requested_info": [],
+  "checks": [
+    {
+      "id": "fix_applied",
+      "name": "4a 已给出可用的修复改动",
+      "pass": true,
+      "detail": "fixed=True，change_type=script",
+      "reason_code": null
+    },
+    {
+      "id": "change_target",
+      "name": "修复目标明确",
+      "pass": true,
+      "detail": "target=ci/scripts/staging_install.sh，risk=low",
+      "reason_code": null
+    },
+    {
+      "id": "verification_present",
+      "name": "5a 验证阶段已执行",
+      "pass": true,
+      "detail": "reproduction.mode=verify，attempts=3",
+      "reason_code": null
+    },
+    {
+      "id": "fix_verified",
+      "name": "验证结论为「修复有效」",
+      "pass": true,
+      "detail": "fix_verified=True，reproducible=yes",
+      "reason_code": null
+    },
+    {
+      "id": "evidence_present",
+      "name": "证据条数 >= 2",
+      "pass": true,
+      "detail": "证据 12 条（要求 >= 2）",
+      "reason_code": null
+    },
+    {
+      "id": "loop_not_exhausted",
+      "name": "回炉轮次 <= 2",
+      "pass": true,
+      "detail": "当前第 1 轮（上限 2 轮）",
+      "reason_code": null
+    }
+  ],
+  "quality_scores": {
+    "evidence": 1.0,
+    "consistency": 1.0,
+    "path": 1.0,
+    "checks_passed": 6,
+    "checks_total": 6,
+    "overall": 1.0
+  },
+  "notes": "修复与验证证据一致，风险低；第 1 轮机械预检 6/6 通过；结论 approve（ok）"
+}

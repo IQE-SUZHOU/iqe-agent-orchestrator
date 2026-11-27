@@ -1,0 +1,64 @@
+{
+  "case_id": "demo-case-external",
+  "build": 1223,
+  "source": "mock-jenkins",
+  "job": "os-staging-test",
+  "rca": "driver",
+  "component": "driver",
+  "signature": "driver:crash:877804487963",
+  "key_frames": [
+    "amdgpu: failed to process VM fault on ring gfx_0 (retry 1/3)",
+    "[  412.881203] Kernel panic - not syncing: Fatal exception in interrupt",
+    "dmesg 尾部：Oops 发生在 resume 之后 3s，模块版本 24.04.1",
+    "Finished: FAILURE",
+    "[stage: kernel-mode-suite] 运行 gfx1151 kernel-mode 用例集（12 例）"
+  ],
+  "reproduction": {
+    "case_id": "demo-case-external",
+    "mode": "evidence",
+    "reproducible": "yes",
+    "attempts": 2,
+    "matrix": [
+      {
+        "os": "sut-target-os 24.04",
+        "config": "default",
+        "outcome": "fail"
+      },
+      {
+        "os": "sut-target-os 24.04",
+        "config": "default",
+        "outcome": "fail"
+      }
+    ],
+    "steps_summary": [
+      "锁定 sut-gfx1151-01 机位",
+      "以原参数重建 os-staging-test 同参任务",
+      "执行 kernel-mode 用例集（12 例）",
+      "抓取 dmesg 与 console 并做指纹比对",
+      "释放机位并登记制品"
+    ],
+    "failing_tests": [
+      "kernel-mode/queue_reinit",
+      "kernel-mode/smu_ops"
+    ],
+    "passing_tests": [],
+    "fix_verified": null,
+    "new_evidence": [
+      {
+        "kind": "repro_log",
+        "uri": "db://evidence/7",
+        "note": "[evidence] attempt 1 → fail"
+      },
+      {
+        "kind": "repro_log",
+        "uri": "db://evidence/8",
+        "note": "[evidence] attempt 2 → fail"
+      }
+    ],
+    "blocked_reason": null,
+    "log_excerpt": "repro attempt 1: amdgpu GPU page fault at 0x7f10c0000000 vmid 1\nKernel panic - not syncing: Fatal exception in interrupt\nrepro attempt 2: 同一错误簇复现，dmesg 尾部 Oops 一致"
+  },
+  "requested_focus": null,
+  "baseline": "staging-pass-2026-11-24",
+  "change_window": "a1b2c3d..f4e5d6a"
+}

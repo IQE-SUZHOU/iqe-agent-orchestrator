@@ -1,0 +1,57 @@
+{
+  "case_id": "demo-case-external",
+  "backend": "jira-mock",
+  "external_key": "OST-1654",
+  "url": "http://jira.mock/browse/OST-1654",
+  "ticket_status": "created",
+  "duplicate_of": null,
+  "priority": "P1",
+  "assignee_team": "OS-Driver",
+  "linked_patches": [
+    "a1b2c3d"
+  ],
+  "sections": [
+    {
+      "key": "rca",
+      "title": "根因结论",
+      "content": "根因判定：driver（组件 driver，签名 driver:crash:877804487963）。"
+    },
+    {
+      "key": "repro",
+      "title": "复现结论与矩阵",
+      "content": "复现结论：yes（2 次）\n- sut-target-os 24.04 / default → fail\n- sut-target-os 24.04 / default → fail"
+    },
+    {
+      "key": "regression",
+      "title": "回归判定与 guilty patch",
+      "content": "判定为回归，guilty patch：a1b2c3d（PR-1187 / wang.lei，置信度 0.86）\n在 a1b2c3d 上复现、在其父提交上通过；改动引入 smu_ops 未初始化"
+    },
+    {
+      "key": "evidence",
+      "title": "证据清单",
+      "content": "- repro_log db://evidence/7 [evidence] attempt 1 → fail\n- repro_log db://evidence/8 [evidence] attempt 2 → fail"
+    },
+    {
+      "key": "impact",
+      "title": "影响面",
+      "content": "影响 job：os-staging-test#1223（OST 流水线）。同签名族在本次扫描内已合并处理。"
+    },
+    {
+      "key": "next_steps",
+      "title": "建议下一步",
+      "content": "建议：OS-Driver 复核 a1b2c3d 并决定回滚或补丁修复。"
+    }
+  ],
+  "audit": {
+    "backend": "jira-mock",
+    "autocreate": true,
+    "project_key": "OST",
+    "case_id": "demo-case-external",
+    "signature": "driver:crash:877804487963",
+    "scenario": "new_failure",
+    "dedup_source": "none",
+    "routing_rule": "rca×reproducible×regression",
+    "priority": "P1",
+    "assignee_team": "OS-Driver"
+  }
+}

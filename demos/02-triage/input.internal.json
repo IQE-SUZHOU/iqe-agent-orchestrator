@@ -1,0 +1,27 @@
+{
+  "case_id": "demo-case-internal",
+  "build": 1243,
+  "source": "mock-jenkins",
+  "job": "os-staging-image",
+  "signal": "error",
+  "signature": "toolchain:compile-error:26e973278578",
+  "log_excerpt": "Started by upstream project ci-nightly #2419\nRunning on builder-07 in /tmp/ws-77e1/os-staging-image\n[stage: compile-userspace-lib] make -C userspace all\ngcc -O2 -fno-strict-aliasing -Iinclude -c src/copy_engine.c -o obj/copy_engine.o\nsrc/copy_engine.c:212:7: error: undefined reference to 'gfx_copy_engine_flush'\nsrc/copy_engine.c:219:11: error: 'copy_ctx' undeclared (first use in this function)\ncc1: 编译失败，共 2 个错误\nmake: *** [Makefile:24: obj/copy_engine.o] 错误 1\n构建阶段 compile-userspace-lib 中止：工具链新增报错，与历史签名不同\nFinished: FAILURE",
+  "context": {
+    "mock_scenario": "mixed",
+    "failed_stage": "compile-userspace-lib",
+    "family": "toolchain:compile-error",
+    "component": "toolchain",
+    "scan_id": "scan-demo-demo-case-internal",
+    "branch": "master",
+    "duration_s": 240,
+    "started_at": "2026-11-25T06:20:00Z"
+  },
+  "evidence_refs": [
+    {
+      "kind": "log_excerpt",
+      "uri": "db://evidence/1",
+      "note": "build 1243 失败段"
+    }
+  ],
+  "requested_focus": null
+}

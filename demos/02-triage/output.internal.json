@@ -1,0 +1,54 @@
+{
+  "case_id": "demo-case-internal",
+  "rca": "environment",
+  "path": "internal",
+  "component": "toolchain",
+  "os_stage": "staging-image-build",
+  "signature": "toolchain:compile-error:26e973278578",
+  "duplicate_of": null,
+  "confidence": 0.72,
+  "key_frames": [
+    "src/copy_engine.c:212:7: error: undefined reference to 'gfx_copy_engine_flush'",
+    "src/copy_engine.c:219:11: error: 'copy_ctx' undeclared (first use in this function)",
+    "Finished: FAILURE",
+    "[stage: compile-userspace-lib] make -C userspace all",
+    "gcc -O2 -fno-strict-aliasing -Iinclude -c src/copy_engine.c -o obj/copy_engine.o"
+  ],
+  "routed_reason": "组件 toolchain 归属 内部自动化，预判走 internal 路径（最终由闸门 1 决策）",
+  "kb_refs": [
+    "KB-FIX-002"
+  ],
+  "triage_notes": [
+    "签名族 toolchain:compile-error（签名 toolchain:compile-error:26e973278578）：错误簇集中在 toolchain 侧，根因判定 environment，置信度 0.72。",
+    "排除 driver / test 类：蒸馏段内未见对应特征行（参考 SKILL 卡片 environment-failure-triage）。",
+    "归属 OS 阶段 staging-image-build（job os-staging-image），影响 staging 流水线该环节。",
+    "路径预判：internal —— 组件 toolchain 归属 内部自动化，预判走 internal 路径（最终由闸门 1 决策）。",
+    "知识库命中 KB-FIX-002，闸门 1 可分诊时引用历史结论。"
+  ],
+  "evidence": [
+    {
+      "kind": "distilled_log",
+      "uri": "db://evidence/3",
+      "note": "LogDistiller logdistiller-mock/v1：592B → 492B（保留 8 行）"
+    },
+    {
+      "kind": "kb_lookup",
+      "uri": "db://evidence/4",
+      "note": "知识库命中 1 条（KB-FIX-002）"
+    },
+    {
+      "kind": "skill_card",
+      "uri": "db://evidence/5",
+      "note": "SKILL 卡片 environment-failure-triage（前 800 字）"
+    },
+    {
+      "kind": "triage_note",
+      "uri": "db://evidence/6",
+      "note": "分诊结论要点（供闸门 1、工单与报告引用）"
+    }
+  ],
+  "skill_refs": [
+    "environment-failure-triage"
+  ],
+  "llm_calls": 0
+}

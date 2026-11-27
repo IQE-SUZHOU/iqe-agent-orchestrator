@@ -1,0 +1,47 @@
+{
+  "case_id": "demo-case-external",
+  "gate": "gate1",
+  "verdict": "approve",
+  "decision": "external",
+  "reason_code": "ok",
+  "requested_info": [],
+  "checks": [
+    {
+      "id": "evidence_present",
+      "name": "Case 已有证据引用",
+      "pass": true,
+      "detail": "证据 5 条，关键帧 5 条",
+      "reason_code": null
+    },
+    {
+      "id": "triage_confident",
+      "name": "分诊结论明确且置信度 >= 0.70",
+      "pass": true,
+      "detail": "rca=driver，置信度 0.82",
+      "reason_code": null
+    },
+    {
+      "id": "path_known",
+      "name": "失败归属可判定（internal / external）",
+      "pass": true,
+      "detail": "triage 预判路径=external，知识库 0 条依据",
+      "reason_code": null
+    },
+    {
+      "id": "loop_not_exhausted",
+      "name": "回炉轮次 <= 2",
+      "pass": true,
+      "detail": "当前第 1 轮（上限 2 轮）",
+      "reason_code": null
+    }
+  ],
+  "quality_scores": {
+    "evidence": 1.0,
+    "consistency": 1.0,
+    "path": 1.0,
+    "checks_passed": 4,
+    "checks_total": 4,
+    "overall": 1.0
+  },
+  "notes": "gate1 Mock 复核说明；第 1 轮机械预检 4/4 通过；结论 approve（ok）"
+}

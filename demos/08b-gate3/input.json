@@ -1,0 +1,150 @@
+{
+  "case_id": "demo-case-external",
+  "build": 1223,
+  "source": "mock-jenkins",
+  "job": "os-staging-test",
+  "rca": "driver",
+  "component": "driver",
+  "signature": "driver:crash:877804487963",
+  "key_frames": [
+    "amdgpu: failed to process VM fault on ring gfx_0 (retry 1/3)",
+    "[  412.881203] Kernel panic - not syncing: Fatal exception in interrupt",
+    "dmesg 尾部：Oops 发生在 resume 之后 3s，模块版本 24.04.1",
+    "Finished: FAILURE",
+    "[stage: kernel-mode-suite] 运行 gfx1151 kernel-mode 用例集（12 例）"
+  ],
+  "signal": "error",
+  "path": "external",
+  "confidence": 0.82,
+  "evidence_count": 12,
+  "loop_seq": 1,
+  "requested_focus": null,
+  "reproduction": {
+    "case_id": "demo-case-external",
+    "mode": "evidence",
+    "reproducible": "yes",
+    "attempts": 2,
+    "matrix": [
+      {
+        "os": "sut-target-os 24.04",
+        "config": "default",
+        "outcome": "fail"
+      },
+      {
+        "os": "sut-target-os 24.04",
+        "config": "default",
+        "outcome": "fail"
+      }
+    ],
+    "steps_summary": [
+      "锁定 sut-gfx1151-01 机位",
+      "以原参数重建 os-staging-test 同参任务",
+      "执行 kernel-mode 用例集（12 例）",
+      "抓取 dmesg 与 console 并做指纹比对",
+      "释放机位并登记制品"
+    ],
+    "failing_tests": [
+      "kernel-mode/queue_reinit",
+      "kernel-mode/smu_ops"
+    ],
+    "passing_tests": [],
+    "fix_verified": null,
+    "new_evidence": [
+      {
+        "kind": "repro_log",
+        "uri": "db://evidence/7",
+        "note": "[evidence] attempt 1 → fail"
+      },
+      {
+        "kind": "repro_log",
+        "uri": "db://evidence/8",
+        "note": "[evidence] attempt 2 → fail"
+      }
+    ],
+    "blocked_reason": null,
+    "log_excerpt": "repro attempt 1: amdgpu GPU page fault at 0x7f10c0000000 vmid 1\nKernel panic - not syncing: Fatal exception in interrupt\nrepro attempt 2: 同一错误簇复现，dmesg 尾部 Oops 一致"
+  },
+  "regression": {
+    "case_id": "demo-case-external",
+    "mode": "bisect",
+    "is_regression": true,
+    "baseline": "staging-pass-2026-11-24",
+    "change_window": "a1b2c3d..f4e5d6a",
+    "bisected": true,
+    "guilty_patch": {
+      "commit": "a1b2c3d",
+      "pr": "PR-1187",
+      "author": "wang.lei",
+      "confidence": 0.86,
+      "rationale": "在 a1b2c3d 上复现、在其父提交上通过；改动引入 smu_ops 未初始化"
+    },
+    "candidates": [],
+    "evidence": [
+      {
+        "kind": "regression_bisect",
+        "uri": "db://evidence/11",
+        "note": "6c 二分定位到 a1b2c3d"
+      }
+    ],
+    "notes": [
+      "二分 3 轮定位到单提交"
+    ]
+  },
+  "ticketing": {
+    "case_id": "demo-case-external",
+    "backend": "jira-mock",
+    "external_key": "OST-1654",
+    "url": "http://jira.mock/browse/OST-1654",
+    "ticket_status": "created",
+    "duplicate_of": null,
+    "priority": "P1",
+    "assignee_team": "OS-Driver",
+    "linked_patches": [
+      "a1b2c3d"
+    ],
+    "sections": [
+      {
+        "key": "rca",
+        "title": "根因结论",
+        "content": "根因判定：driver（组件 driver，签名 driver:crash:877804487963）。"
+      },
+      {
+        "key": "repro",
+        "title": "复现结论与矩阵",
+        "content": "复现结论：yes（2 次）\n- sut-target-os 24.04 / default → fail\n- sut-target-os 24.04 / default → fail"
+      },
+      {
+        "key": "regression",
+        "title": "回归判定与 guilty patch",
+        "content": "判定为回归，guilty patch：a1b2c3d（PR-1187 / wang.lei，置信度 0.86）\n在 a1b2c3d 上复现、在其父提交上通过；改动引入 smu_ops 未初始化"
+      },
+      {
+        "key": "evidence",
+        "title": "证据清单",
+        "content": "- repro_log db://evidence/7 [evidence] attempt 1 → fail\n- repro_log db://evidence/8 [evidence] attempt 2 → fail"
+      },
+      {
+        "key": "impact",
+        "title": "影响面",
+        "content": "影响 job：os-staging-test#1223（OST 流水线）。同签名族在本次扫描内已合并处理。"
+      },
+      {
+        "key": "next_steps",
+        "title": "建议下一步",
+        "content": "建议：OS-Driver 复核 a1b2c3d 并决定回滚或补丁修复。"
+      }
+    ],
+    "audit": {
+      "backend": "jira-mock",
+      "autocreate": true,
+      "project_key": "OST",
+      "case_id": "demo-case-external",
+      "signature": "driver:crash:877804487963",
+      "scenario": "new_failure",
+      "dedup_source": "none",
+      "routing_rule": "rca×reproducible×regression",
+      "priority": "P1",
+      "assignee_team": "OS-Driver"
+    }
+  }
+}

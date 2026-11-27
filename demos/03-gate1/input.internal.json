@@ -1,0 +1,22 @@
+{
+  "case_id": "demo-case-internal",
+  "build": 1243,
+  "source": "mock-jenkins",
+  "job": "os-staging-image",
+  "rca": "environment",
+  "component": "toolchain",
+  "signature": "toolchain:compile-error:26e973278578",
+  "key_frames": [
+    "src/copy_engine.c:212:7: error: undefined reference to 'gfx_copy_engine_flush'",
+    "src/copy_engine.c:219:11: error: 'copy_ctx' undeclared (first use in this function)",
+    "Finished: FAILURE",
+    "[stage: compile-userspace-lib] make -C userspace all",
+    "gcc -O2 -fno-strict-aliasing -Iinclude -c src/copy_engine.c -o obj/copy_engine.o"
+  ],
+  "signal": "error",
+  "path": "internal",
+  "confidence": 0.72,
+  "evidence_count": 6,
+  "loop_seq": 1,
+  "requested_focus": null
+}

@@ -42,9 +42,14 @@ def test_shared_schemas_are_present_in_both():
         "data/schemas/envelope.schema.json",
         "data/schemas/stage-contracts.json",
         "data/schemas/plan.schema.json",
-        "data/workflows/s1_lite.yaml",
+        "contracts.py",
+        "kb.py",
+        "data/workflows/s1_observe_only.yaml",
         "data/workflows/s2_full.yaml",
-        "data/fixtures/plans/warming_ok.yaml",
+        "data/workflows/s3_test_no_repro.yaml",
+        "data/fixtures/plans/internal_ok.yaml",
+        "data/fixtures/plans/external_ok.yaml",
+        "data/fixtures/kb/entries.json",
     ):
         assert (SRC / rel).is_file(), rel
         assert (DST / rel).is_file(), rel

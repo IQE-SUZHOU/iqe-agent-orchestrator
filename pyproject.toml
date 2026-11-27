@@ -39,7 +39,7 @@ pythonpath = ["orchestrator/src", "agents/src"]
 markers = [
     "unit: 离线单元测试（不需要 broker / Postgres / Agent 进程）",
     "contract: 两个子项目之间的契约一致性测试（共享层副本、schema）",
-    "integration: 端到端集成测试（需要编排层 + 6 个 Agent 在跑）",
+    "integration: 端到端集成测试（需要编排层 + 8 个 Agent 在跑）",
 ]
 filterwarnings = ["ignore::DeprecationWarning"]
 
@@ -47,7 +47,7 @@ filterwarnings = ["ignore::DeprecationWarning"]
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-src = ["orchestrator/src", "agents/src", "tests"]
+src = ["orchestrator/src", "agents/src", "tests", "demos"]
 extend-exclude = [".plans", ".run", "docs"]
 
 [tool.ruff.lint]
@@ -71,7 +71,7 @@ target-version = ["py312"]
 [tool.isort]
 profile = "black"
 line_length = 100
-src_paths = ["orchestrator/src", "agents/src", "tests"]
+src_paths = ["orchestrator/src", "agents/src", "tests", "demos"]
 
 # ───────────────────────── mypy ─────────────────────────
 [tool.mypy]

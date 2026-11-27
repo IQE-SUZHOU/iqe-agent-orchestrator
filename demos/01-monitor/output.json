@@ -1,0 +1,87 @@
+{
+  "scan_id": "scan-demo-demo-case-external",
+  "observations": [
+    {
+      "obs_id": "obs-scan-demo-demo-case-external-1221",
+      "source": "mock-jenkins",
+      "job": "os-staging-image",
+      "build": 1221,
+      "result": "SUCCESS",
+      "signal": "none",
+      "signature": null,
+      "noise_score": 0.0,
+      "known_issue_ref": null,
+      "promoted_reason": null,
+      "suppressed": false,
+      "log_excerpt": "Started by timer (nightly-warming)\nRunning on builder-07 in /tmp/jenkins-ws-77e1/os-staging-image\n[checkout] Cloning branch master (sha 8f3c1de) … done in 12s\n[stage: warming-构建] 产出 os-staging-image 24.04.1201\n[stage: warming-构建] 推送 registry.mock:5000/os-staging-image:24.04.1201 完成\n汇总：9 个 stage 全部通过，告警 0 条\nFinished: SUCCESS",
+      "evidence_refs": [],
+      "context": {
+        "mock_scenario": "new_failure"
+      }
+    },
+    {
+      "obs_id": "obs-scan-demo-demo-case-external-1222",
+      "source": "mock-jenkins",
+      "job": "os-staging-boot",
+      "build": 1222,
+      "result": "SUCCESS",
+      "signal": "none",
+      "signature": null,
+      "noise_score": 0.0,
+      "known_issue_ref": null,
+      "promoted_reason": null,
+      "suppressed": false,
+      "log_excerpt": "Started by timer (warming-boot)\nRunning on sut-boot-02 (locked)\n[stage: boot-check] UEFI 引导成功，systemd 默认 target 就绪\n[stage: boot-check] journald 抓取 812 行，无告警\n耗时 6m44s\nFinished: SUCCESS",
+      "evidence_refs": [],
+      "context": {
+        "mock_scenario": "new_failure"
+      }
+    },
+    {
+      "obs_id": "obs-scan-demo-demo-case-external-1223",
+      "source": "mock-jenkins",
+      "job": "os-staging-test",
+      "build": 1223,
+      "result": "FAILURE",
+      "signal": "error",
+      "signature": "driver:crash:877804487963",
+      "noise_score": 0.0,
+      "known_issue_ref": null,
+      "promoted_reason": "new_failure_signature",
+      "suppressed": false,
+      "log_excerpt": "Started by upstream project os-staging-test #1221\nRunning on sut-gfx1151-01 (locked) in /tmp/ws-9f2c/os-staging-test\n[checkout] Cloning branch master (sha 5b91a02)\n[stage: kmod-load] 加载 amdgpu-dkms 24.04.1 模块，耗时 41s\n[stage: kernel-mode-suite] 运行 gfx1151 kernel-mode 用例集（12 例）\namdgpu 0000:61:00.0: GPU page fault at 0x7f10c0000000, vmid 1\namdgpu: failed to process VM fault on ring gfx_0 (retry 1/3)\n[  412.881203] Kernel panic - not syncing: Fatal exception in interrupt\n[  412.881240] Call Trace: amdgpu_irq_handler+0x1a4/0x4c0 [amdgpu]\n[  412.881260] RIP: 0010:amdgpu_vm_handle_fault+0x1d8/0x520 [amdgpu]\ndmesg 尾部：Oops 发生在 resume 之后 3s，模块版本 24.04.1\n构建机被看护程序重启，12 个用例未跑完\nFinished: FAILURE",
+      "evidence_refs": [
+        {
+          "kind": "log_excerpt",
+          "uri": "db://evidence/1",
+          "note": "build 1223 失败段"
+        }
+      ],
+      "context": {
+        "mock_scenario": "new_failure",
+        "failed_stage": "kernel-mode-suite",
+        "locked_resource": "sut-gfx1151-01",
+        "family": "driver:crash",
+        "component": "driver",
+        "scan_id": "scan-demo-demo-case-external",
+        "branch": "master",
+        "duration_s": 1012,
+        "started_at": "2026-11-25T04:20:00Z"
+      }
+    }
+  ],
+  "counts": {
+    "observed": 3,
+    "promoted": 1,
+    "suppressed": 0
+  },
+  "scan_window": "15m",
+  "source_status": [
+    {
+      "name": "mock-jenkins",
+      "ok": true,
+      "feed": "ci_feed/new_failure.json",
+      "job_default": "os-staging-test"
+    }
+  ]
+}
